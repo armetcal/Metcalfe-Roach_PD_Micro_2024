@@ -1,0 +1,320 @@
+---
+title: "3d. Enrichment Analysis - KO Terms"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(ggpubr)
+library(phyloseq)
+library(tidyverse)
+
+# This function is a little different from the one in "999. Differential Abundance Functions.R" - instead of using a list of the the raw tool outputs as the main input, it uses the curated stats table that is available in the Supplementary.
+combine_da_results = function(u,var = 'StatusPD',mintools = 2,alpha=0.05,stat='p_val'){
+  # u=m1
+  # mintools = 2;alpha=0.05;stat='p_val'
+  
+  u = u %>% filter(Variable==var)
+  # Determine which microbes are significant, and in how many datasets
+  if(stat=='q_val'){
+    sig = u %>% mutate(sig = as.numeric(q_val<alpha))
+    all2 = u %>% filter(q_val<alpha) %>% select(all_of(names(u)[1]),association_dir) %>% unique
+  } else if(stat=='p_val'){
+    sig = u  %>% mutate(sig = as.numeric(p_val<alpha))
+    all2 = u %>% filter(p_val<alpha) %>% select(all_of(names(u)[1]),association_dir) %>% unique
+  } else {print('stat must be "q_val" or "p_val".')}
+  
+  if(!(length(unique(all2[,1] %>% unname %>% unlist))==nrow(all2))){
+    print('ERROR: ASSOCIATION DIRECTIONS ARE DIFFERENT')
+  }
+  
+  sig = sig %>% 
+    dplyr::select(all_of(names(u)[1]), DA,Variable,sig) %>%
+    pivot_wider(names_from = DA, values_from = sig)
+  sig$total_sig = apply(sig[,3:ncol(sig)],1,sum)
+  sig = sig %>% mutate(sig_in_at_least_n = as.numeric(total_sig>=mintools)) %>% 
+    left_join(all2)
+  
+  return(sig %>% arrange(-sig_in_at_least_n))
+}
+```
+
+```{r}
+# Set pval threshold
+pval_cutoff = 0.15
+
+# Extract association directions of significant hits
+u1 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx',sheet='univar') %>% 
+  combine_da_results(alpha=pval_cutoff,stat='p_val')
+length(unique(u1$Species)) == nrow(u1) # True if no conflicting results
+
+m1 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx',sheet='multivar') %>% 
+  combine_da_results(alpha=pval_cutoff,stat='p_val') %>% filter(sig_in_at_least_n==T)
+length(unique(m1$Species)) == nrow(m1) # True if no conflicting results 
+
+# Change sig to ns if it's not significant in model
+maas = u1 %>% mutate(sig_in_at_least_n = ifelse(Species %in% m1$Species, sig_in_at_least_n,0)) %>% 
+  separate(col = Species,sep = ': ',into = c('KO','desc'))
+
+# See how many significant hits we get
+# There are 284 hits that are under the p value threshold, and 1644 that are under.
+# Good ratio for enrichment.
+table(maas$sig_in_at_least_n)
+```
+
+```{r}
+# Hierarchy data - extract only COG terms that are present in dataset
+brite = read.csv('../Reference Files/KO_key.csv',colClasses = 'character')
+
+# Extract KO data
+df = maas %>% filter(KO %in% brite$all)
+
+# Filter BRITE to only include annotations present in dataset
+brite = brite %>% filter(all %in% df$KO)
+length(unique(brite$all)) == nrow(df) # Make sure there are no duplicates
+```
+
+# KEGG ORTHOLOGY ~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r KEGG Fisher function}
+allsig = df %>% filter(sig_in_at_least_n==1)
+
+# Total KO terms:
+total_ko = unique(df$KO) %>% length
+# Total KO terms that are significant in at least 2 tools (p<0.05):
+total_pos = length(allsig$KO[allsig$association_dir=='Positive'])
+total_neg = length(allsig$KO[allsig$association_dir=='Negative'])
+# Total NONsignificant terms
+total_notpos = total_ko-total_pos
+total_notneg = total_ko-total_neg
+
+# This function runs a Fisher's exact test on the category of interest.
+# level: hierarchal level. Not relevant for KO
+# brite_cat: a list of all KO categories being tested
+# min_terms: the minimum number of KO enzymes required in order to test a category.
+run_fisher = function(level,brite_cat,min_terms=10){
+  # level = 'L3'; test_cat = '09103 Lipid metabolism';min_terms = 10
+  f = tibble()
+  for(test_cat in brite_cat){
+    # Select all KO that are part of the desired pathway
+    # Filter for unique, because there could be multiple lower-level pathways mapping to the same pathway.
+    # BRITE has been filtered to only include ko terms present in dataset.
+    relevant_ko = brite$all[brite[[level]] == test_cat] %>% unique()
+    pwy_ko = length(relevant_ko)
+    
+    # Only run stats test if there are enough terms in the pathway to justify it.
+    if(pwy_ko>=min_terms){
+          # How many hits are positive and negative?
+          pwy_pos = length(allsig$KO[allsig$KO %in% relevant_ko &
+                                          allsig$association_dir=='Positive'] %>% unique())
+          pwy_neg = length(allsig$KO[allsig$KO %in% relevant_ko &
+                                          allsig$association_dir=='Negative'] %>% unique())
+          # How many are NOT positive or NOT negative?
+          pwy_notpos = pwy_ko-pwy_pos # Includes sig neg
+          pwy_notneg = pwy_ko-pwy_neg # Includes sig pos
+          
+          # Create Fisher tables
+          dat.pos <- data.frame( #ifelse is in case there are no true or no false hits.
+                "NS" = c(total_notpos-pwy_notpos,pwy_notpos),
+                "Sig" = c(total_pos-pwy_pos, pwy_pos),
+                row.names = c("Background", test_cat),
+                stringsAsFactors = FALSE)
+          dat.neg <- data.frame( #ifelse is in case there are no true or no false hits.
+                "NS" = c(total_notneg-pwy_notneg,pwy_notneg),
+                "Sig" = c(total_neg-pwy_neg, pwy_neg),
+                row.names = c("Background", test_cat),
+                stringsAsFactors = FALSE)
+          
+          # Running one-way Fisher tests - only significant if the number of hits is significantly
+          # LARGER than the background. We don't care about stuff that's signif. lower.
+          f.pos = fisher.test(dat.pos,alternative='greater')[c("p.value","estimate")] %>% unlist()
+          f.neg = fisher.test(dat.neg,alternative='greater')[c("p.value","estimate")] %>% unlist()
+          f = rbind(f,tibble(Dir = "Positive", Test = test_cat, pval = f.pos[1], estimate = f.pos[2],
+                     total_sig = total_pos, total_ns = total_notpos, 
+                     pct_total = 100*total_pos/(total_pos+total_notpos) %>% round(3),
+                     pwy_sig = pwy_pos, pwy_ns = pwy_notpos,  
+                     pct_pwy = 100*pwy_pos/(pwy_pos+pwy_notpos) %>% round(3))) %>% 
+            rbind(tibble(Dir = "Negative", Test = test_cat, pval = f.neg[1], estimate = f.neg[2],
+                     total_sig = total_neg, total_ns = total_notneg, 
+                     pct_total = 100*total_neg/(total_neg+total_notneg) %>% round(3),
+                     pwy_sig = pwy_neg, pwy_ns = pwy_notneg, pct_pwy = 100*pwy_neg/(pwy_neg+pwy_notneg) %>% round(3))) %>% 
+            select(Dir:pval,everything()) %>% arrange(pval)
+    }
+  }
+  
+  if(nrow(f)>0){
+     f = f %>% group_by(Dir) %>% mutate(qval=p.adjust(pval,method='fdr'), Level = level) %>% 
+       ungroup %>% select(Dir,Level, everything())
+  } else { f = tibble() }
+  
+  return(f)
+}
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Run Fisher tests for various levels of the hierarchy
+
+```{r All Brite}
+# Run the entire BRITE hierarchy. We won't use these as our main results, 
+# but just to provide extra information about KEGG categories of interest
+# that don't have relevant non-KEGG Orthology modules.
+all_brite = tibble()
+brite_cat = brite$L1 %>% unique()
+f.L1 = run_fisher(level='L1',brite_cat,min_terms = 8)
+
+brite_cat = brite$L2 %>% unique()
+f.L2 = run_fisher(level='L2',brite_cat,min_terms = 8)
+
+brite_cat = brite$L3 %>% unique()
+f.L3 = run_fisher(level='L3',brite_cat,min_terms = 8)
+
+brite_cat = brite$L4 %>% unique()
+f.L4 = run_fisher(level='L4',brite_cat,min_terms = 8)
+
+all_brite = all_brite %>% rbind(f.L1,f.L2,f.L3,f.L4)
+all_brite_pvalsig = all_brite %>% filter(pval<0.05)
+
+# Ugly code that adds the hierarchy information
+brite_trunc = brite %>% select(L1:L4) %>% unique()
+all_brite_info = all_brite_pvalsig %>% 
+  filter(Test != '') %>% 
+  mutate(rownum = row_number()) %>% 
+  pivot_wider(names_from = Level, values_from = Test) %>% 
+  mutate(L3 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)]),x[length(x)-1],brite_trunc$L3[brite_trunc$L4==x[length(x)]] %>% unique())})) %>% 
+  mutate(L2 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)-1]),x[length(x)-2],brite_trunc$L2[brite_trunc$L3==x[length(x)-1]] %>% unique())})) %>% 
+  mutate(L1 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)-2]),x[length(x)-3],brite_trunc$L1[brite_trunc$L2==x[length(x)-2]] %>% unique())})) %>% # Can't get mutate across to work, so fixing names manually
+  mutate(L2 = .$L2 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L3 = .$L3 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L4 = .$L4 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)))
+
+all_brite_qvalsig = all_brite_info %>% filter(qval<0.05)
+```
+
+```{r All KEGG}
+brite_cat = brite$L2[brite$L1=='KEGG Orthology (KO) [BR:ko00001]'] %>% unique()
+f.L2 = run_fisher(level='L2',brite_cat,min_terms = 8)
+
+brite_cat = brite$L3[brite$L1=='KEGG Orthology (KO) [BR:ko00001]'] %>% unique()
+f.L3 = run_fisher(level='L3',brite_cat,min_terms = 8)
+
+brite_cat = brite$L4[brite$L1=='KEGG Orthology (KO) [BR:ko00001]'] %>% unique()
+f.L4 = run_fisher(level='L4',brite_cat,min_terms = 4)
+
+all_kegg = rbind(f.L2,f.L3,f.L4)
+all_kegg_pvalsig = all_kegg %>% filter(pval<0.05)
+
+# Ugly code that adds the hierarchy information
+brite_trunc = brite %>% select(L1:L4) %>% unique()
+all_kegg_info = all_kegg_pvalsig %>% 
+  filter(Test != '') %>% 
+  mutate(rownum = row_number()) %>% 
+  pivot_wider(names_from = Level, values_from = Test) %>% 
+  mutate(L3 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)]),x[length(x)-1],brite_trunc$L3[brite_trunc$L4==x[length(x)]] %>% unique())})) %>% 
+  mutate(L2 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)-1]),x[length(x)-2],brite_trunc$L2[brite_trunc$L3==x[length(x)-1]] %>% unique())})) %>% 
+  mutate(L1 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)-2]),x[length(x)-3],brite_trunc$L1[brite_trunc$L2==x[length(x)-2]] %>% unique())})) %>% # Can't get mutate across to work, so fixing names manually
+  mutate(L2 = .$L2 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L3 = .$L3 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L4 = .$L4 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)))
+
+all_kegg_qvalsig = all_kegg_info %>% filter(qval<0.05)
+```
+
+# Look at non-Kegg hierarchies of interest
+
+```{r Ribosome}
+var = c('Ribosome [BR:ko03011]')
+brite_cat = brite$L2[brite$L1 %in% var] %>% unique()
+f.L2 = run_fisher(level='L2',brite_cat,min_terms = 4)
+
+brite_cat = brite$L3[brite$L1 %in% var] %>% unique()
+f.L3 = run_fisher(level='L3',brite_cat,min_terms = 4)
+
+brite_cat = brite$L4[brite$L1 %in% var] %>% unique() %>% .[. != '']
+f.L4 = run_fisher(level='L4',brite_cat,min_terms = 4)
+
+all_ribo = rbind(f.L2,f.L3,f.L4)
+all_ribo_pvalsig = all_ribo %>% filter(pval<0.05)
+
+# Ugly code that adds the hierarchy information
+brite_trunc = brite %>% select(L1:L4) %>% filter(L1==var) %>% unique()
+all_ribo_info = all_ribo_pvalsig %>% 
+  filter(Test != '') %>% 
+  mutate(rownum = row_number()) %>% 
+  pivot_wider(names_from = Level, values_from = Test) %>% 
+  mutate(L3 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)]),x[length(x)-1],brite_trunc$L3[brite_trunc$L4==x[length(x)]] %>% unique())})) %>% 
+  mutate(L2 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)-1]),x[length(x)-2],brite_trunc$L2[brite_trunc$L3==x[length(x)-1]] %>% unique())})) %>% # Can't get mutate across to work, so fixing names manually
+  mutate(L2 = .$L2 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L3 = .$L3 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L4 = .$L4 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)))
+
+all_ribo_qvalsig = all_ribo_info %>% filter(qval<0.05)
+```
+
+```{r Transporters}
+var = c('Transporters [BR:ko02000]')
+brite_cat = brite$L2[brite$L1 %in% var] %>% unique()
+f.L2 = run_fisher(level='L2',brite_cat,min_terms = 4)
+
+brite_cat = brite$L3[brite$L1 %in% var] %>% unique()
+f.L3 = run_fisher(level='L3',brite_cat,min_terms = 4)
+
+brite_cat = brite$L4[brite$L1 %in% var] %>% unique() %>% .[. != '']
+f.L4 = run_fisher(level='L4',brite_cat,min_terms = 4)
+
+all_trans = rbind(f.L2,f.L3,f.L4)
+all_trans_pvalsig = all_trans %>% filter(pval<0.05)
+
+# Ugly code that adds the hierarchy information
+brite_trunc = brite %>% select(L1:L4) %>% filter(L1==var) %>% unique()
+all_trans_info = all_trans_pvalsig %>% 
+  filter(Test != '') %>% 
+  mutate(rownum = row_number()) %>% 
+  pivot_wider(names_from = Level, values_from = Test) %>% 
+  mutate(L3 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)]),x[length(x)-1],brite_trunc$L3[brite_trunc$L4==x[length(x)]] %>% unique())})) %>% 
+  mutate(L2 = apply(.,1,function(x){
+    ifelse(is.na(x[length(x)-1]),x[length(x)-2],brite_trunc$L2[brite_trunc$L3==x[length(x)-1]] %>% unique())})) %>% # Can't get mutate across to work, so fixing names manually
+  mutate(L2 = .$L2 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L3 = .$L3 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)),
+         L4 = .$L4 %>% sapply(function(x) str_split(x, ' [|] ')[[1]] %>% tail(n=1)))
+
+all_trans_qvalsig = all_trans_info %>% filter(qval<0.05)
+```
+
+```{r KEGG Translation}
+# There is no translation-specific module, so we're merely extracting all the translation KO terms
+# so that we have a record of which ones were significant.
+
+to_test = brite$L4[str_detect(brite$L3,'09122 Translation')]
+all_translation = all_brite %>% filter(Test %in% to_test)
+
+# Extract all translation hits
+brite_trunc = brite %>% filter(str_detect(L3,'09122 Translation'))
+rel_ko = brite$all[str_detect(brite$L3,'09122 Translation')]
+all_translation_pvalsig = all_kegg %>% filter(Test %in% brite_trunc$L4, pval<0.05)
+all_translation_sigko = allsig %>% filter(association_dir == unique(all_translation_pvalsig$Dir)) %>% 
+  filter(KO %in% rel_ko) %>% 
+  left_join(brite_trunc %>% rename(KO = all))
+```
+
+```{r Save Results}
+writexl::write_xlsx(list('BRITE' = all_brite,'KEGG' = all_kegg,
+                         'Transporters' = all_trans, 'Ribosomes' = all_ribo),
+                    '../Results/Supplementary Data/Enrichment Analysis/KO2.xlsx')
+
+writexl::write_xlsx(list('BRITE' = all_brite_qvalsig,'KEGG' = all_kegg_qvalsig, 
+                         'Transporters' = all_trans_qvalsig,'Ribosomes' = all_ribo_qvalsig,
+                         'Translation Sig KO' = all_translation_sigko),
+                    '../Results/Supplementary Data/Enrichment Analysis/KO2 - Sig Only.xlsx')
+```
+

@@ -1,0 +1,283 @@
+---
+title: "1. DA of Microbiome"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load Data}
+library(phyloseq)
+library(ANCOMBC)
+library(ALDEx2)
+library(Maaslin2)
+library(tidyverse)
+library(ggpubr)
+
+# This contains functions that run each differential abundance tool, and organize the resulting data so that the results of all tests can be neatly combined.
+source("999. Differential Abundance Functions.R")
+# This contains all the taxonomic and sample data necessary for cross-sectional analyses.
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds")
+
+# Prep phyloseq objects
+p = ps %>% tax_glom('Phylum')
+f = ps %>% tax_glom('Family')
+g = ps %>% tax_glom('Genus')
+sp = ps %>% tax_glom('Species')
+
+# Set the significance threshold
+alpha = 0.05 
+```
+
+# PHYLUM
+
+```{r Phylum - Univariate, include=FALSE}
+p.maas = tidy_maaslin(phyloseq=p,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Phylum')
+p.aldex = tidy_aldex2(phyloseq=p,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Phylum')
+# Special case: ANCOM-BC does not perform well with <=5 taxa groups. There are only 5 groups present with a prevalence cut of 0.33. Therefore, we run the analysis at prevalence=0.1 and then filter the results. This is only applicable for the Phylum level.
+p.ancom = tidy_ancombc(phyloseq=p,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Phylum')
+w = which(unlist(unname(p.ancom$results['Phylum'])) %in% unlist(unname(p.maas$results['Phylum'])))
+p.ancom$results = p.ancom$results[w,] %>%
+  mutate(StatusPD__q_val = p.adjust(StatusPD__p_val,method='BH'))
+# Significant hits will have a q value under alpha.
+p.all = combine_da_results(res=list(p.ancom,p.aldex,p.maas),alpha=alpha,stat='q_val')
+```
+
+```{r Phylum - Multivariate, include=FALSE}
+p.maas.m = tidy_maaslin(phyloseq=p,formula='Status+Sex+laxatives+depth',
+               abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Phylum')
+p.aldex.m = tidy_aldex2(phyloseq=p,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Phylum')
+# Special case: ANCOM-BC does not perform well with <=5 taxa groups. There are only 5 groups present with a prevalence cut of 0.33. Therefore, we run the analysis at prevalence=0.1 and then filter the results. This is only applicable for the Phylum level.
+p.ancom.m = tidy_ancombc(phyloseq=p,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Phylum')
+w = which(unlist(unname(p.ancom.m$results['Phylum'])) %in% unlist(unname(p.maas.m$results['Phylum'])))
+p.ancom.m$results = p.ancom.m$results[w,] %>%
+  mutate(StatusPD__q_val = p.adjust(StatusPD__p_val,method='BH'))
+
+sig = p.all$sig_hits[,1] %>% unlist
+if(length(sig)>0){
+  # Filter multi results to only include sig taxa
+  L = select_univar_taxa(list(p.ancom.m,p.aldex.m,p.maas.m),sig)
+  # Significant hits will have a q value under alpha.
+  p.all.m = combine_da_results(res=L,alpha=alpha,stat='q_val')
+}
+```
+
+# FAMILY
+
+```{r Family - Univariate, include=FALSE}
+f.maas = tidy_maaslin(phyloseq=f,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Family')
+f.aldex = tidy_aldex2(phyloseq=f,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Family')
+f.ancom = tidy_ancombc(phyloseq=f,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Family')
+# Significant hits will have a q value under alpha.
+f.all = combine_da_results(res=list(f.ancom,f.aldex,f.maas),alpha=alpha,stat='q_val')
+```
+
+```{r Family - Multivariate, include=FALSE}
+f.maas.m = tidy_maaslin(phyloseq=f,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Family')
+f.aldex.m = tidy_aldex2(phyloseq=f,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Family')
+f.ancom.m = tidy_ancombc(phyloseq=f,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Family')
+
+sig = f.all$sig_hits[,1] %>% unlist
+if(length(sig)>0){
+  # Filter multi results to only include sig taxa
+  L = select_univar_taxa(list(f.ancom.m,f.aldex.m,f.maas.m),sig)
+  # Significant hits will have a q value under alpha.
+  f.all.m = combine_da_results(res=L,alpha=alpha,stat='q_val')
+}
+```
+
+# GENUS
+
+```{r Genus - Univariate, include=FALSE}
+g.maas = tidy_maaslin(phyloseq=g,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Genus')
+g.aldex = tidy_aldex2(phyloseq=g,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Genus')
+g.ancom = tidy_ancombc(phyloseq=g,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Genus')
+# Significant hits will have a q value under alpha.
+g.all = combine_da_results(res=list(g.ancom,g.aldex,g.maas),alpha=alpha,stat='q_val')
+```
+
+```{r Genus - Multivariate, include=FALSE}
+g.maas.m = tidy_maaslin(phyloseq=g,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Genus')
+g.aldex.m = tidy_aldex2(phyloseq=g,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Genus')
+g.ancom.m = tidy_ancombc(phyloseq=g,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Genus')
+
+sig = g.all$sig_hits[,1] %>% unlist
+if(length(sig)>0){
+  # Filter multi results to only include sig taxa
+  L = select_univar_taxa(list(g.ancom.m,g.aldex.m,g.maas.m),sig)
+  # Significant hits will have a q value under alpha.
+  g.all.m = combine_da_results(res=L,alpha=alpha,stat='q_val')
+}
+```
+
+# SPECIES
+
+```{r Species - Univariate, include=FALSE}
+s.maas = tidy_maaslin(phyloseq=sp,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+s.aldex = tidy_aldex2(phyloseq=sp,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Species')
+s.ancom = tidy_ancombc(phyloseq=sp,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a q value under alpha.
+s.all = combine_da_results(res=list(s.ancom,s.aldex,s.maas),alpha=alpha,stat='q_val')
+```
+
+```{r Species - Multivariate, include=FALSE}
+s.maas.m = tidy_maaslin(phyloseq=sp,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+s.aldex.m = tidy_aldex2(phyloseq=sp,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.33, max_significance = alpha,
+                    tax_level='Species')
+s.ancom.m = tidy_ancombc(phyloseq=sp,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.33, alpha = alpha,
+                    tax_level='Species')
+
+sig = s.all$sig_hits[,1] %>% unlist
+if(length(sig)>0){
+  # Filter multi results to only include sig taxa
+  L = select_univar_taxa(list(s.ancom.m,s.aldex.m,s.maas.m),sig)
+  # Significant hits will have a q value under alpha.
+  s.all.m = combine_da_results(res=L,alpha=alpha,stat='q_val')
+}
+```
+
+# COMBINE UNI AND MULTIVAR RESULTS
+
+```{r}
+# If there were no sig uni results, then no multi was tested
+
+species = list(uni = s.all, multi = s.all.m)
+genus = list(uni = g.all, multi = g.all.m)
+
+if(exists('f.all.m')){
+  family = list(uni = f.all, multi = f.all.m)
+} else {
+  family = list(uni = f.all, multi = list(combined_res = s.all$combined_res %>% filter(is.na(Species)), 
+             significance_summary = s.all$significance_summary %>% filter(is.na(Species))))
+}
+
+phylum = list(uni = p.all, multi = p.all.m)
+```
+
+# CALCULATE RELATIVE ABUNDANCE AND CLR ABUNDANCES
+
+```{r}
+L = list(Phylum=p,Family=f,Genus=g,Species=sp)
+
+L.out = L %>% lapply(function(x){
+  # x=p
+  
+  # Relative Abundance
+  x1 = x %>% microbiome::transform('compositional') %>% psmelt() %>% 
+    dplyr::select(Sample,Status,any_of(c('Phylum','Class','Order','Family','Genus','Species')),Abundance)
+  name = names(x1)[ncol(x1)-1] # second last name, lowest level taxonomy
+  names(x1)[ncol(x1)-1] = 'temp'
+  x2 = x1 %>% group_by(temp,Status) %>% summarize(Rel_Ab=100*mean(Abundance)) %>% arrange(-Rel_Ab) %>% ungroup()
+  x3 = x1 %>% mutate(Abundance = ifelse(Abundance==0,0,1)) %>% group_by(temp,Status) %>%
+    summarize(Prevalence = sum(Abundance)) %>% ungroup()
+  x4 = x1 %>% dplyr::select(Sample,Status) %>% unique %>% group_by(Status) %>% count()
+  xout = x2 %>% left_join(x3) %>% left_join(x4) %>% 
+    mutate(Prevalence = round(100*Prevalence/n,1)) %>% 
+    dplyr::select(-n) %>% 
+    pivot_wider(names_from = Status, values_from = c(Rel_Ab,Prevalence)) %>% 
+    mutate(`Log 2 FC (PD/Ctrl)` = round(log2(Rel_Ab_PD/Rel_Ab_Ctrl),2),.after=Rel_Ab_PD) %>% 
+    mutate(Rel_Ab_PD = round(Rel_Ab_PD,2), Rel_Ab_Ctrl = round(Rel_Ab_Ctrl,2))
+  
+  names(xout)[names(xout)=='temp'] = name
+  
+  # CLR Abundance
+  y1 = x %>% microbiome::transform('clr') %>% psmelt() %>% 
+    dplyr::select(Sample,Status,any_of(c('Phylum','Class','Order','Family','Genus','Species')),Abundance)
+  name = names(y1)[ncol(y1)-1] # second last name, lowest level tayonomy
+  names(y1)[ncol(y1)-1] = 'temp'
+  y2 = y1 %>% group_by(temp,Status) %>% summarize(CLR_Ab=mean(Abundance)) %>% arrange(-CLR_Ab) %>% ungroup()
+  yout = y2 %>% 
+    pivot_wider(names_from = Status, values_from = CLR_Ab) %>% 
+    rename(CLR_Ab_PD=PD, CLR_Ab_Ctrl=Ctrl) %>% 
+    mutate(`CLR Change (PD-Ctrl)` = round(CLR_Ab_PD-CLR_Ab_Ctrl,2)) %>% 
+    mutate(CLR_Ab_PD = round(CLR_Ab_PD,2), CLR_Ab_Ctrl = round(CLR_Ab_Ctrl,2))
+  
+  names(yout)[names(yout)=='temp'] = name
+  
+  out = xout %>% left_join(yout) %>% 
+    dplyr::select(any_of(c('Phylum','Class','Order','Family','Genus','Species')),
+                  contains('Rel_Ab'),`Log 2 FC (PD/Ctrl)`,
+                  contains('CLR'),`CLR Change (PD-Ctrl)`,
+                  everything())
+  
+  return(out)
+})
+```
+
+
+# SAVE RESULTS
+
+```{r}
+# Univar
+writexl::write_xlsx(list(Phylum = phylum$uni$combined_res,Family=family$uni$combined_res,
+                         Genus=genus$uni$combined_res,Species=species$uni$combined_res),
+                    '../Results/Supplementary Data/Differential Abundance/Taxonomy_Univar_Stats.xlsx')
+writexl::write_xlsx(list(Phylum = phylum$uni$significance_summary,Family=family$uni$significance_summary,
+                         Genus=genus$uni$significance_summary,Species=species$uni$significance_summary),
+                    '../Results/Supplementary Data/Differential Abundance/Taxonomy_Univar_Summary.xlsx')
+
+# Multivar
+writexl::write_xlsx(list(Phylum = phylum$multi$combined_res,Family=family$multi$combined_res,
+                         Genus=genus$multi$combined_res,Species=species$multi$combined_res),
+                    '../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Stats.xlsx')
+writexl::write_xlsx(list(Phylum = phylum$multi$significance_summary,Family=family$multi$significance_summary,
+                         Genus=genus$multi$significance_summary,Species=species$multi$significance_summary),
+                    '../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx')
+
+# Abundance and Prevalence Stats
+writexl::write_xlsx(L.out,
+                    '../Results/Supplementary Data/Differential Abundance/Taxonomy_Abundance_and_Prevalence.xlsx')
+```
+

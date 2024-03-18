@@ -1,0 +1,214 @@
+---
+title: "6c. Disease Progression - KO"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(lme4)
+library(lmerTest)
+library(scales)
+
+# Prepare the data ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# We will combine our longitudinal dataset with our taxonomy data, where only the microbes of interest are included.
+
+# EC Data - CLR transformed
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["ko"]] %>% microbiome::transform('clr')
+
+# Load sig pwy
+temp = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx',sheet='univar') %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% 
+  select(Species,association_dir) %>% unique
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% temp$Species) %>% 
+  group_by(DA) %>% mutate(q_val = p.adjust(p_val,method='BH')) %>% ungroup %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% 
+  select(Species,association_dir) %>% unique
+
+# Make a vector of the pathways to test
+sig = temp2[['Species']]
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth,OTU,Abundance,Species) %>% unique
+
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+# baseline bristol rating and microbial abundances are static variables.
+long = long0 %>% left_join(psm, multiple='all')
+
+# Variables to test
+vars = c('mds.total','mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')
+```
+
+```{r set up}
+# Center static predictors, normalize where necessary.
+# This reduces spurious correlations as explained in LMER documentation.
+# Center each OTU separately.
+pd = long %>% filter(Status == 'PD') %>% group_by(Species) %>% 
+  # Rescale to range of 0-1
+  mutate(Abundance = rescale(Abundance)) %>% 
+  # Center around 0
+  mutate(Abundance = Abundance-mean(Abundance,na.rm=T)) %>% ungroup()
+
+# Rescale to 0-1
+pd = pd %>% mutate_at(vars('months_last_visit',all_of(vars),'depth',contains('base.')),rescale)
+# 
+# # Center scale
+pd = pd %>% mutate_at(vars('months_last_visit',all_of(vars),'depth',contains('base.')),
+                      function(x) x - mean(x,na.rm=T))
+```
+
+# 'Univariate' model that only controls for age and baseline
+
+```{r}
+# Univar
+stats.uni = tibble()
+for(v in vars){
+  for(s in sig){
+    # s = sig[1]
+    temp = pd %>% filter(Species == s)
+    names(temp)[names(temp)==v] = 'test'
+    
+    lmertest = lmer(test ~ months_last_visit*Abundance + (months_last_visit|Sample), data = temp,
+                    REML = F,
+                    control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+    
+    L = lmertest %>% broom.mixed::tidy() %>% as.tibble() %>% mutate(Variable = v, Species = s)
+    stats.uni = stats.uni %>% rbind(L)
+  }
+}
+
+stats.uni.filt = stats.uni %>% filter(str_detect(term,'months_last_visit:Abundance')) %>%
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup
+```
+
+# 'Multivar' model that controls for relevant microbial and non-microbial variables
+
+```{r}
+stats.multi = tibble()
+for(v in vars){
+  for(s in sig){
+    # s = sig[1]
+    temp = pd %>% filter(Species == s)
+    names(temp)[names(temp)==v] = 'test'
+    
+    lmertest = lmer(test ~ months_last_visit*Abundance + laxatives + Sex + depth + (months_last_visit|Sample), data = temp,
+                    REML = F,
+                    control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+    
+    L = lmertest %>% broom.mixed::tidy() %>% as.tibble() %>% mutate(Variable = v, Species = s)
+    stats.multi = stats.multi %>% rbind(L)
+  }
+}
+
+stats.multi.filt = stats.multi %>% filter(str_detect(term,'months_last_visit:Abundance')) %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Plots
+
+```{r Univar Dot Plot}
+tempstats = stats.uni %>% filter(term=='months_last_visit:Abundance') %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup %>% 
+  mutate(Qval = ifelse(q.value>0.05,'',
+                       ifelse(q.value>0.01,'*',
+                              ifelse(q.value>0.001,'**',
+                                     ifelse(q.value<=0.001,'***',''))))) %>% 
+  mutate(Qval2 = ifelse(q.value>0.1,'',
+                        ifelse(q.value>0.05,'+',''))) %>% 
+  rename('Interaction\nEstimate' = estimate) %>% 
+  mutate(Species = str_wrap(Species,40))
+
+# Edit levels for plotting
+tempstats$Variable[tempstats$Variable=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+tempstats$Variable[tempstats$Variable=='mds.total'] = 'Total UPDRS'
+tempstats$Variable[tempstats$Variable=='mds1.total'] = 'UPDRS 1'
+tempstats$Variable[tempstats$Variable=='mds2.total'] = 'UPDRS 2'
+tempstats$Variable[tempstats$Variable=='mds3.total'] = 'UPDRS 3'
+tempstats$Variable[tempstats$Variable=='mds4.total'] = 'UPDRS 4'
+
+tempstats$Variable = factor(tempstats$Variable,levels = c('Total UPDRS','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4','Levodopa\nEq. Dose'))
+tempstats = tempstats %>% droplevels() %>% as.data.frame() %>% filter(!is.na(Variable))
+  
+# Arrange data
+tempstats_order = tempstats %>% filter(Variable=='Total UPDRS') %>% arrange(`Interaction\nEstimate`)
+tempstats$Species = factor(tempstats$Species, levels = unique(tempstats_order$Species))
+
+tempstats %>% 
+  ggplot(aes(Variable,Species,col=`Interaction\nEstimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25) +
+  geom_text(aes(label=Qval2),size = 12, col = 'white',nudge_y = 0)
+
+ggsave('../Results/Supplementary Figures/Fig. 4 - KO vs Disease Progression - Univar.png',height=28,width=9)
+```
+
+```{r Multivar Dot Plot}
+tempstats.multi = stats.multi %>% filter(term=='months_last_visit:Abundance') %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup %>% 
+  mutate(Qval = ifelse(q.value>0.05,'',
+                       ifelse(q.value>0.01,'*',
+                              ifelse(q.value>0.001,'**',
+                                     ifelse(q.value<=0.001,'***',''))))) %>% 
+  mutate(Qval2 = ifelse(q.value>0.1,'',
+                        ifelse(q.value>0.05,'+',''))) %>% 
+  rename('Interaction\nEstimate' = estimate) %>% 
+  mutate(Species = str_wrap(Species,40))
+
+# Edit levels for plotting
+tempstats.multi$Variable[tempstats.multi$Variable=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds.total'] = 'Total UPDRS'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds1.total'] = 'UPDRS 1'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds2.total'] = 'UPDRS 2'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds3.total'] = 'UPDRS 3'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds4.total'] = 'UPDRS 4'
+
+tempstats.multi$Variable = factor(tempstats.multi$Variable,levels = c('Total UPDRS','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4','Levodopa\nEq. Dose'))
+tempstats.multi = tempstats.multi %>% droplevels() %>% as.data.frame() %>% filter(!is.na(Variable))
+  
+# Arrange data
+tempstats.multi$Species = factor(tempstats.multi$Species, levels = unique(tempstats_order$Species))
+
+tempstats.multi %>% ggplot(aes(Variable,Species,col=`Interaction\nEstimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25) +
+  geom_text(aes(label=Qval2),size = 12, col = 'white',nudge_y = 0)
+
+ggsave('../Results/Supplementary Figures/Fig. 4 - KO vs Disease Progression - Multivar.png',height=28,width=9)
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~
+#Save Results
+
+```{r}
+# Save Statistics
+L = list('Univar' = stats.uni.filt, 'Multivar' = stats.multi.filt, 
+         'All Univar' = stats.uni, 'All Multivar' = stats.multi)
+writexl::write_xlsx(L,'../Results/Supplementary Data/Progression/KO vs Disease Progression Stats.xlsx')
+```

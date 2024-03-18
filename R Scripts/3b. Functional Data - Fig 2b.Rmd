@@ -1,0 +1,71 @@
+---
+title: "3c. Functional Data - Fig 2b"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(ggpubr)
+library(data.table)
+library(tidyverse)
+
+# Phyloseq object of MetaCyc pathways
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["pwy"]]
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r Plot MetaCyc Pathways}
+# Load significant pwys
+sig_multi = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='multivar') %>% 
+  filter(Variable=='StatusPD',sig_in_at_least_n == T)
+sig_uni = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='univar') %>% 
+  filter(sig_in_at_least_n == T) %>% 
+  # Add alpha value depending on whether it's univariately or multivariately sig
+  mutate(alpha = Species %in% sig_multi$Species)
+
+# Calculate log 2 fc
+lfc = ps %>% microbiome::transform('compositional') %>% psmelt() %>% 
+  filter(Species %in% sig_uni$Species) %>%
+  # Add alpha value depending on whether it's univariately or multivariately sig
+  mutate(alpha = Species %in% sig_multi$Species) %>% 
+  mutate(Species = str_replace(Species, '[&]beta;-D','B-D')) %>% 
+  mutate(Species = str_replace(Species, 'superpathway of ', 'superpathway of\n')) %>% 
+  mutate(Species = str_replace(Species, 'NADH phosphorylation', 'NADH\nphosphorylation')) %>% 
+  mutate(Species = str_replace(Species, ' [(]', '\n(')) %>%
+  group_by(Status,Species,alpha) %>% 
+  summarize(Abundance = mean(Abundance),.groups='keep') %>% ungroup %>% 
+  pivot_wider(names_from = Status, values_from = Abundance) %>% 
+  mutate(lfc = log2(PD/Ctrl)) %>% arrange(lfc)
+lfc$Species = factor(lfc$Species, levels = lfc$Species)
+
+# Plot 1: LFC
+p1 = lfc %>% mutate(COL = ifelse(lfc<0,'#01BEC3','#FC746E')) %>% 
+  ggplot(aes(lfc,Species,fill = COL, alpha = alpha)) +
+  geom_col(aes(fill = COL)) +
+  theme_minimal(base_size = 16) +
+  scale_alpha_discrete(range = c(1, 0.35)) +
+  ylab(NULL) + xlab('Log2 FC (PD/Ctrl)') +
+  theme(legend.position = 'none')
+
+# Plot 2: CLR-transformed abundances
+p2 = ps %>% microbiome::transform('clr') %>% psmelt() %>% 
+  filter(Species %in% sig_uni$Species) %>% 
+  mutate(Species = str_replace(Species, '[&]beta;-D','B-D')) %>% 
+  mutate(Species = str_replace(Species, 'superpathway of ', 'superpathway of\n')) %>% 
+  mutate(Species = str_replace(Species, 'NADH phosphorylation', 'NADH\nphosphorylation')) %>% 
+  mutate(Species = str_replace(Species, ' [(]', '\n(')) %>%
+  mutate(Species = factor(Species, levels = lfc$Species)) %>% 
+  ggplot(aes(Abundance,Species,fill = Status)) +
+  geom_boxplot() +
+  theme_minimal(base_size = 16) +
+  theme(axis.text.y = element_blank()) +
+  xlab('CLR') + ylab(NULL)
+
+plot.out = ggarrange(plotlist = list(p1+theme(legend.position='none'),p2),
+                     common.legend = F, ncol=2, widths = c(3,1.7))
+
+ggsave('../Results/2. Differential Abundance & Enrichments/Fig. 2b - Differentially Abundant MetaCyc.png', height = 5.5, width = 12)
+```

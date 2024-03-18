@@ -1,0 +1,31 @@
+---
+title: "4b. Microbes Important for DA Pathways"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+
+# Load all the significant taxa-annotation correlations per dataset
+pwy = read_xlsx('../Results/Supplementary Data/Differential Abundance/Stratified MetaCyc.xlsx',sheet='Min 33% of Fun Term')
+ko = read_xlsx('../Results/Supplementary Data/Differential Abundance/Stratified KO.xlsx',sheet='Min 33% of Fun Term')
+cog = read_xlsx('../Results/Supplementary Data/Differential Abundance/Stratified COG.xlsx',sheet='Min 33% of Fun Term')
+ec = read_xlsx('../Results/Supplementary Data/Differential Abundance/Stratified EC.xlsx',sheet='Min 33% of Fun Term')
+
+# Combine results, remove unclassified reads
+df = full_join(pwy,ko) %>% full_join(cog) %>% full_join(ec) %>% unique %>% 
+  filter(Taxon !='unclassified') %>% 
+  mutate_at(vars(contains('%')),function(x) x*100)
+df[is.na(df)] = 0
+df = df %>% 
+  mutate(`Total (/148)` = `MetaCyc (/7)` + `COG (/38)` + `KO (/59)` + `EC (/44)`) %>% 
+  mutate(`Total (%)` = round(100*`Total (/148)`/148,0)) %>% 
+  select(Taxon, contains('/'),everything()) %>% 
+  arrange(-`Total (/148)`)
+
+writexl::write_xlsx(df,'../Results/Table 1 - Stratified Hits.xlsx')
+```
+

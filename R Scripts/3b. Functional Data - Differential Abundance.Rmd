@@ -1,0 +1,186 @@
+---
+title: "3b. Functional Data - Differential Abundance"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(Maaslin2)
+library(ggpubr)
+library(data.table)
+library(vegan)
+library(tidyverse)
+
+# This contains functions that run each differential abundance tool, and organize the resulting data so that the results of all tests can be neatly combined.
+source("999. Differential Abundance Functions.R")
+# This contains all the functional data necessary for cross-sectional analysis.
+ps = readRDS("../Reference Files/functional_phyloseq.rds")
+
+# Set the significance threshold
+alpha = 0.05 
+```
+
+# MetaCyc
+
+```{r MetaCyc Univariate}
+meta.maas = tidy_maaslin(phyloseq=ps$pwy,formula='Status',
+                    abun_cut=1e-4,prv_cut=1/3, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+meta.aldex = tidy_aldex2(phyloseq=ps$pwy,formula='Status',
+                    abun_cut=1e-4,prv_cut=1/3, max_significance = alpha,
+                    tax_level='Species')
+meta.ancom = tidy_ancombc(phyloseq=ps$pwy,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=1/3, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a q value under alpha.
+meta.all = combine_da_results(res=list(meta.ancom,meta.aldex,meta.maas),alpha=alpha,stat='q_val')
+```
+
+```{r MetaCyc - Multivariate}
+meta.maas.m = tidy_maaslin(phyloseq=ps$pwy,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=1/3, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+meta.aldex.m = tidy_aldex2(phyloseq=ps$pwy,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=1/3, max_significance = alpha,
+                    tax_level='Species')
+meta.ancom.m = tidy_ancombc(phyloseq=ps$pwy,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=1/3, alpha = alpha,
+                    tax_level='Species')
+
+sig = meta.all$sig_hits[,1] %>% unlist
+if(length(sig)>0){
+  # Filter multi results to only include sig taxa
+  L = select_univar_taxa(list(meta.ancom.m,meta.aldex.m,meta.maas.m),sig)
+  # Significant hits will have a q value under alpha.
+  meta.all.m = combine_da_results(res=L,alpha=alpha,stat='q_val')
+}
+```
+
+```{r Save Results}
+species = list(univar = meta.all,multivar = meta.all.m)
+
+writexl::write_xlsx(species %>% lapply(function(x)x$combined_res),'../Results/Supplementary Data/Differential Abundance/MetaCyc_Stats.xlsx')
+writexl::write_xlsx(species %>% lapply(function(x)x$significance_summary),'../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx')
+```
+
+# EggNOG
+
+```{r COG Enzymes Univariate}
+egg.maas = tidy_maaslin(phyloseq=ps$eggnog,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+egg.aldex = tidy_aldex2(phyloseq=ps$eggnog,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    tax_level='Species')
+egg.ancom = tidy_ancombc(phyloseq=ps$eggnog,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.1, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a q value under alpha.
+egg.all = combine_da_results(res=list(egg.ancom,egg.aldex,egg.maas),alpha=alpha,stat='q_val')
+```
+
+```{r COG Enzymes - Multivariate}
+egg.maas.m = tidy_maaslin(phyloseq=ps$eggnog,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+egg.aldex.m = tidy_aldex2(phyloseq=ps$eggnog,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    tax_level='Species')
+egg.ancom.m = tidy_ancombc(phyloseq=ps$eggnog,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.1, alpha = alpha,
+                    tax_level='Species')
+
+# Significant hits will have a p value under alpha.
+egg.all.m = combine_da_results(res=list(egg.ancom.m,egg.aldex.m,egg.maas.m),alpha=alpha,stat='p_val')
+```
+
+```{r Save Results}
+species = list(univar = egg.all,multivar = egg.all.m)
+
+writexl::write_xlsx(species %>% lapply(function(x)x$combined_res %>% dplyr::select(-contains('t value'))),'../Results/Supplementary Data/Differential Abundance/COG Enzymes_Stats2.xlsx')
+writexl::write_xlsx(species %>% lapply(function(x)x$significance_summary),'../Results/Supplementary Data/Differential Abundance/COG Enzymes_Summary2.xlsx')
+```
+
+# KO Terms
+
+```{r KO - Univariate}
+ko.maas = tidy_maaslin(phyloseq=ps$ko,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+ko.aldex = tidy_aldex2(phyloseq=ps$ko,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    tax_level='Species')
+ko.ancom = tidy_ancombc(phyloseq=ps$ko,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.1, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a q value under alpha.
+ko.all = combine_da_results(res=list(ko.ancom,ko.aldex,ko.maas),alpha=alpha,stat='q_val')
+```
+
+```{r KO - Multivariate}
+ko.maas.m = tidy_maaslin(phyloseq=ps$ko,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+ko.aldex.m = tidy_aldex2(phyloseq=ps$ko,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    tax_level='Species')
+ko.ancom.m = tidy_ancombc(phyloseq=ps$ko,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.1, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a p value under alpha.
+ko.all.m = combine_da_results(res=list(ko.ancom.m,ko.aldex.m,ko.maas.m),alpha=alpha,stat='p_val')
+```
+
+```{r Save Results}
+species = list(univar = ko.all,multivar = ko.all.m)
+
+writexl::write_xlsx(species %>% lapply(function(x)x$combined_res %>% dplyr::select(-contains('t value'))),'../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx')
+writexl::write_xlsx(species %>% lapply(function(x)x$significance_summary),'../Results/Supplementary Data/Differential Abundance/KO_Summary2.xlsx')
+```
+
+# EC Terms
+
+```{r EC - Univariate}
+rxn.maas = tidy_maaslin(phyloseq=ps$rxn,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+rxn.aldex = tidy_aldex2(phyloseq=ps$rxn,formula='Status',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    tax_level='Species')
+rxn.ancom = tidy_ancombc(phyloseq=ps$rxn,formula='Status',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.1, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a q value under alpha.
+rxn.all = combine_da_results(res=list(rxn.ancom,rxn.aldex,rxn.maas),alpha=alpha,stat='q_val')
+```
+
+```{r EC - Multivariate}
+rxn.maas.m = tidy_maaslin(phyloseq=ps$rxn,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    normalization='TSS',transform = 'AST',
+                    tax_level='Species')
+rxn.aldex.m = tidy_aldex2(phyloseq=ps$rxn,formula='Status+Sex+laxatives+depth',
+                    abun_cut=1e-4,prv_cut=0.1, max_significance = alpha,
+                    tax_level='Species')
+rxn.ancom.m = tidy_ancombc(phyloseq=ps$rxn,formula='Status+Sex+laxatives',group='Status',struc_zero=T,
+                    abun_cut=1e-4,prv_cut=0.1, alpha = alpha,
+                    tax_level='Species')
+# Significant hits will have a p value under alpha.
+rxn.all.m = combine_da_results(res=list(rxn.ancom.m,rxn.aldex.m,rxn.maas.m),alpha=alpha,stat='p_val')
+```
+
+```{r Save Results}
+species = list(univar = rxn.all,multivar = rxn.all.m)
+
+writexl::write_xlsx(species %>% lapply(function(x)x$combined_res %>% dplyr::select(-contains('t value'))),'../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx')
+writexl::write_xlsx(species %>% lapply(function(x)x$significance_summary),'../Results/Supplementary Data/Differential Abundance/EC_Summary2.xlsx')
+```

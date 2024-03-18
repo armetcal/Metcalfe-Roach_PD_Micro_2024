@@ -1,0 +1,182 @@
+---
+title: "6a. Change in Disease Severity and Medication Over Time"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(lmerTest)
+library(scales)
+
+# Load participant data
+psm = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% 
+  subset_taxa(Species == 's__Blautia_obeum') %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth) %>% unique
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+table(is.na(long0$mds3.total))
+
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+# baseline bristol rating and microbial abundances are static variables.
+long = long0 %>% left_join(psm, multiple='all') %>% 
+  filter(Status=='PD')
+
+# Variables to test
+vars = c('hy','mds.total','mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')
+
+df = long %>% dplyr::select(Sample,redcap_event_name,months_last_visit,clinstate,all_of(vars)) %>% 
+  rename(Visit = redcap_event_name, `Months in Study` = months_last_visit, `Clinical State` = clinstate,
+         `Hoehn & Yahr` = hy,
+         `Total MDS-UPDRS` = mds.total, `MDS-UPDRS 1` = mds1.total,
+         `MDS-UPDRS 2` = mds2.total, `MDS-UPDRS 3` = mds3.total,
+         `MDS-UPDRS 4` = mds4.total, `Levodopa\nEq. Dose` = levo.eq.dose)
+```
+
+```{r Change in seveirty over time - mixed models}
+# This calculates the average change over time per variable, taking multiple measurements into account using mixed models.
+to_test = names(df)[str_detect(names(df),'UPDRS') | str_detect(names(df),'Levo') | str_detect(names(df),'Hoehn')]
+temp = df %>% mutate_at(vars(to_test), rescale)
+
+lmerresults = tibble()
+for(i in to_test){
+  f = as.formula(paste0('`',i,'`',' ~ `Months in Study` + (`Months in Study`|Sample)'))
+  a = lmer(formula = f, data = df, REML=F, 
+           control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000))) %>% 
+    # Format results
+    summary %>% .$coefficients %>% as.data.frame() %>% remove_rownames() %>% 
+    mutate(Variable = i,.before=Estimate)
+  lmerresults = rbind(lmerresults,a[2,])
+}
+lmerresults = lmerresults %>% mutate(qval = p.adjust(`Pr(>|t|)`, method='BH'),.after='Pr(>|t|)')
+
+lmerresults_scaled = tibble()
+for(i in to_test){
+  f = as.formula(paste0('`',i,'`',' ~ `Months in Study` + (`Months in Study`|Sample)'))
+  a = lmer(formula = f, data = temp, REML=F, 
+           control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000))) %>% 
+    # Format resultsd
+    summary %>% .$coefficients %>% as.data.frame() %>% remove_rownames() %>% 
+    mutate(Variable = i,.before=Estimate)
+  lmerresults_scaled = rbind(lmerresults_scaled,a[2,])
+}
+lmerresults_scaled = lmerresults_scaled %>% mutate(qval = p.adjust(`Pr(>|t|)`, method='BH'),.after='Pr(>|t|)')
+```
+
+
+```{r All Participants}
+df1 = df %>% 
+  pivot_longer(cols = -c(Sample,Visit), names_to = 'Variable', values_to = 'value') %>% 
+  filter(!is.na(value)) %>% 
+  group_by(Visit,Variable) %>% 
+  summarise(Mean = mean(value),
+            SD = sd(value)) %>% 
+  mutate(value = paste(round(Mean,1),' (',round(SD,1),')',sep='')) %>% 
+  select(-Mean,-SD) %>% 
+  pivot_wider(names_from = Variable, values_from = value) %>% 
+  select(Visit,`Months in Study`,`Hoehn & Yahr`, `Total MDS-UPDRS`, contains('UPDRS'), `Levodopa\nEq. Dose`) %>% 
+  mutate(Visit = paste('Visit',str_sub(Visit,7,7)))
+df1
+```
+
+```{r Divide into Progression tertiles}
+# This gives an estimate of progression for each person, calculated by taking the slope of mds4.total~months_last_visit.
+# mds4.total is the MDS-UPDRS Part 4 score at a given timepoint.
+long_est = long0 %>% group_by(Sample) %>% 
+  filter(!is.na(mds4.total), !is.na(months_last_visit)) %>% 
+  group_modify(~summary(glm(.$mds4.total~.$months_last_visit))$coefficients %>% 
+                 as.data.frame %>% rownames_to_column('Variable') %>% 
+                 filter(Variable != '(Intercept)')) %>% 
+  ungroup() %>% mutate(Variable = str_remove(Variable,'[.][$]')) %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast')))
+```
+
+```{r Average Progression Per Group}
+avg_prog = tibble()
+for (v in vars){
+  # v=vars[1]
+  # mds.total is the Total MDS-UPDRS score at a given timepoint.
+  temp = long0 %>% group_by(Sample) %>% 
+    filter(!is.na(!!sym(v)), !is.na(months_last_visit)) %>% 
+    group_modify(~summary(glm(.[[v]]~.$months_last_visit))$coefficients %>% 
+                   as.data.frame %>% rownames_to_column('Variable') %>% 
+                   filter(Variable != '(Intercept)')) %>% 
+    ungroup() %>% mutate(Variable = str_remove(Variable,'[.][$]')) %>% 
+    left_join(long_est %>% select(Sample,Progression)) %>% 
+    group_by(Progression) %>% 
+    mutate(Estimate = 12*Estimate) %>% # change per year instead of month
+    summarize(Mean = mean(Estimate), SD = sd(Estimate)) %>% 
+    mutate(value = paste(round(Mean,1),' (',round(SD,1),')',sep='')) %>% 
+    select(-Mean,-SD) %>% 
+    mutate(Variable = v)
+  avg_prog = rbind(avg_prog,temp)
+}
+
+avg2 = avg_prog %>% 
+  pivot_wider(names_from = Variable, values_from = value) %>% 
+  filter(!is.na(Progression)) %>% 
+    rename(`Hoehn & Yahr` = hy, `Total MDS-UPDRS` = mds.total, `MDS-UPDRS 1` = mds1.total,
+         `MDS-UPDRS 2` = mds2.total, `MDS-UPDRS 3` = mds3.total,
+         `MDS-UPDRS 4` = mds4.total, `Levodopa\nEq. Dose` = levo.eq.dose)
+
+avg2
+```
+
+# Test for correlation between follow up time and baseline 
+People with less severe disease may be able to come to more visits.
+
+```{r}
+base = df %>% filter(`Months in Study`==0) %>% select(-`Months in Study`)
+longest_fu = df %>% group_by(Sample) %>% arrange(`Months in Study`) %>%
+  slice(n()) %>% ungroup %>% select(Sample, `Months in Study`)
+
+base = base %>% left_join(longest_fu) %>% 
+  pivot_longer(cols = c(contains('UPDRS'),'Levodopa\nEq. Dose'), names_to = 'Variable', values_to = 'Value')
+
+stats = base %>% group_by(Variable) %>% 
+  group_modify(~cor.test(~.$Value+.$`Months in Study`, method = 'spearman',cor.coef.name='rho', data=.) %>% broom::tidy()) %>% ungroup %>% 
+  mutate(qval = p.adjust(p.value, method='BH'),.after='p.value') %>% 
+  rename(rho = estimate)
+
+base %>% 
+  ggplot(aes(Value,`Months in Study`)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=18) +
+  geom_text(aes(x=0,y=80,label=paste0('rho=',round(rho,2),', q=',round(qval,2))),
+            data = stats, size = 4.5,lineheight=0.8,hjust=0) +
+  facet_wrap('Variable',scale='free') + 
+  xlab('Disease Metric Value') +
+  scale_y_continuous(expand = expansion(mult = 0.1))
+
+ggsave('../Results/Supplementary Figures/Fig. S5 - Baseline Severity vs Total Length of Follow Up.jpeg', height=6,  width=8)
+```
+
+```{r}
+# Format table s2
+s2 = lmerresults %>% 
+  rename(`Degrees\nFreedom` = df, `P value` = `Pr(>|t|)`, `Q value` = qval)
+s2s = lmerresults_scaled %>% 
+  rename(`Degrees\nFreedom` = df, `P value` = `Pr(>|t|)`, `Q value` = qval)
+
+
+writexl::write_xlsx(list('Avg Values Per Visit' = df1, 'Change Per Year & Tertile' = avg2,
+                         'Prog Rates (Table S2)' = s2,
+                         'Scaled Prog Rates' = s2s,
+                         'Baseline vs Total Follow-up' = stats),
+                    '../Results/Supplementary Data/Progression/0. Progression of Disease Severity and Medication.xlsx')
+```
+
+####
+
+
+

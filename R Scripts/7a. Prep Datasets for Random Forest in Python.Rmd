@@ -1,0 +1,274 @@
+---
+title: "7a. Prep Datasets for Random Forest in Python"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+# Create datasets for RF
+library(phyloseq)
+library(tidyverse)
+library(scales)
+
+# Extra risk factors
+risk = read.csv('../Reference Files/Misc PD Risk.csv')
+
+# Load data
+
+# Taxonomy
+sig = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Stats.xlsx',sheet = 'Species') %>% 
+  filter(Variable == 'StatusPD') %>% 
+  dplyr::select(Species,DA, association_dir, q_val) %>% rename(Direction= association_dir) %>% 
+  pivot_wider(names_from = DA, values_from = c(Direction,q_val)) %>% 
+  mutate(`Sig (Model)` = ((`q_val_ANCOM-BC`<0.05) + (q_val_ALDEx2<0.05) + (q_val_Maaslin2<0.05) >1)) %>% 
+  filter(`Sig (Model)` == T) %>% pull(Species)
+sig = c(sig, 's__Faecalibacterium_prausnitzii')
+ps = readRDS('../Reference Files/taxonomy_phyloseq.rds') %>% 
+  microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% sig) %>% 
+  psmelt() %>% 
+  select(-OTU, -c(Kingdom:Genus)) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(risk)
+df = ps %>% select(Sample,Status,Sex,bristol,coffee_per_day,smokeprev_or_before_pd,contains('s__'))
+
+# Function ~~~~~~~~~~~~~~~~~~~~~~~~~
+# MetaCyc
+sig = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Stats.xlsx',sheet = 'multivar') %>% 
+  filter(Variable == 'StatusPD') %>% 
+  group_by(DA) %>% mutate(q_val = p.adjust(p_val,method='BH')) %>% ungroup %>% 
+  dplyr::select(Species,DA, association_dir, q_val) %>% rename(Direction= association_dir) %>% 
+  pivot_wider(names_from = DA, values_from = c(Direction,q_val)) %>% 
+  mutate(`Sig (Model)` = ((`q_val_ANCOM-BC`<0.05) + (q_val_ALDEx2<0.05) + (q_val_Maaslin2<0.05) >1)) %>% 
+  filter(`Sig (Model)` == T) %>% pull(Species)
+fun = readRDS('../Reference Files/functional_phyloseq.rds') %>% .[['pwy']] %>% 
+  microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% sig) %>% 
+  psmelt() %>% 
+  select(-OTU) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(risk)
+df2 = fun %>% select(Sample,Status,Sex,bristol,coffee_per_day,smokeprev_or_before_pd,all_of(sig))
+
+# KO
+sig_uni = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx',sheet='univar') %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% 
+  select(Species,association_dir) %>% unique
+sig = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/KO_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% sig_uni$Species) %>% 
+  group_by(DA) %>% mutate(q_val = p.adjust(p_val,method='BH')) %>% ungroup %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% pull(Species) %>% unique
+ko = readRDS('../Reference Files/functional_phyloseq.rds') %>% .[['ko']] %>% 
+  microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% sig) %>% 
+  psmelt() %>% 
+  select(-OTU) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(risk)
+df3 = ko %>% select(Sample,Status,Sex,bristol,coffee_per_day,smokeprev_or_before_pd,all_of(sig))
+
+# COG
+sig_uni = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/COG Enzymes_Stats2.xlsx',sheet='univar') %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% 
+  select(Species,association_dir) %>% unique
+sig = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/COG Enzymes_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% sig_uni$Species) %>% 
+  group_by(DA) %>% mutate(q_val = p.adjust(p_val,method='BH')) %>% ungroup %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% pull(Species) %>% unique
+eggnog = readRDS('../Reference Files/functional_phyloseq.rds') %>% .[['eggnog']] %>% 
+  microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% sig) %>% 
+  psmelt() %>% 
+  select(-OTU) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(risk)
+# Transform depth variable to 0-1 range
+eggnog$depth = rescale(eggnog$depth)
+df4 = eggnog %>% select(Sample,Status,Sex,bristol,coffee_per_day,smokeprev_or_before_pd,all_of(sig))
+
+# EC
+sig_uni = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='univar') %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% 
+  select(Species,association_dir) %>% unique
+sig = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% sig_uni$Species) %>% 
+  group_by(DA) %>% mutate(q_val = p.adjust(p_val,method='BH')) %>% ungroup %>% 
+  filter(q_val<0.05) %>% group_by(Species) %>% add_count() %>% filter(n>1) %>% pull(Species) %>% unique
+ec = readRDS('../Reference Files/functional_phyloseq.rds') %>% .[['rxn']] %>% 
+  microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% sig) %>% 
+  psmelt() %>% 
+  select(-OTU) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(risk)
+# Transform depth variable to 0-1 range
+ec$depth = rescale(ec$depth)
+df5 = ec %>% select(Sample,Status,Sex,bristol,coffee_per_day,smokeprev_or_before_pd,all_of(sig))
+
+#~~~~~~~~~~~~~~~ Bacterially-correlated metabolites
+met = readRDS('../Reference Files/taxonomy_phyloseq.rds') %>% 
+  subset_taxa(Species =='s__Blautia_obeum') %>% 
+  psmelt() %>% 
+  select(-OTU,-c(Kingdom:Species),-Abundance) %>% unique %>% 
+  left_join(risk)
+# Transform depth variable to 0-1 range
+met$depth = rescale(met$depth)
+ts7 = read.csv('../Reference Files/bacterial_metabolites.csv')
+met = ts7 %>% select(Sample,`Metabolite.Identity`,Abundance)  %>% 
+  pivot_wider(names_from = `Metabolite.Identity`, values_from = Abundance) %>% 
+  left_join(met) %>% 
+  select(all_of(names(met)),everything()) %>% 
+  filter(!is.na(bristol))
+df6 = met %>% select(Sample,Status,Sex,bristol,coffee_per_day,smokeprev_or_before_pd,any_of(ts7$Metabolite.Identity))
+# Filter out NAs
+for(i in 11:ncol(df6)){
+  df6 = df6[!is.na(df6[,i]),]
+}
+```
+
+```{r}
+# Progression (UPDRS 4)~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Load longitudinal data
+long = read.csv('../Reference Files/longitudinal_data.csv')
+
+# This gives an estimate of progression for each person, calculated by taking the slope of mds4.total~months_last_visit.
+# mds4.total is the Total MDS-UPDRS score at a given timepoint.
+long_est = long %>% group_by(Sample) %>% 
+  filter(!is.na(mds4.total), !is.na(months_last_visit)) %>% 
+  group_modify(~summary(glm(.$mds4.total~.$months_last_visit))$coefficients %>% 
+                 as.data.frame %>% rownames_to_column('Variable') %>% 
+                 filter(Variable != '(Intercept)')) %>% 
+  ungroup() %>% mutate(Variable = str_remove(Variable,'[.][$]'))
+
+# Taxonomy
+long_all = long_est %>% 
+  left_join(ps) %>% 
+  filter(Status=='PD') %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast'))) %>% 
+  select(Sample,Estimate,Progression,all_of(names(df)))
+# note number of participants
+table(long_all$Progression)
+temp = long_all %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd)
+table(temp$Progression)
+train_set = readxl::read_xlsx('../Reference Files/RF Training Samples - Prog.xlsx')
+table(temp$Progression[temp$Sample %in% train_set$Sample])
+table(temp$Progression[!(temp$Sample %in% train_set$Sample)])
+
+# Function ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+long_all2 = long_est %>% 
+  left_join(fun) %>% 
+  filter(Status=='PD') %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast'))) %>% 
+  select(Sample,Estimate,Progression,all_of(names(df2)))
+
+long_all3 = long_est %>% 
+  left_join(ko) %>% 
+  filter(Status=='PD') %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast'))) %>% 
+  select(Sample,Estimate,Progression,all_of(names(df3)))
+
+long_all4 = long_est %>% 
+  left_join(eggnog) %>% 
+  filter(Status=='PD') %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast'))) %>% 
+  select(Sample,Estimate,Progression,all_of(names(df4)))
+
+long_all5 = long_est %>% 
+  left_join(ec) %>% 
+  filter(Status=='PD') %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast'))) %>% 
+  select(Sample,Estimate,Progression,all_of(names(df5)))
+
+#~~~~~~~~~~~~~~~ Bacterially-correlated metabolites]
+long_all6 = long_est %>% 
+  left_join(met) %>% 
+  filter(Status=='PD') %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast'))) %>% 
+  select(Sample,Estimate,Progression,all_of(names(df6)))
+# Filter out NAs
+for(i in 13:ncol(long_all6)){
+  long_all6 = long_all6[!is.na(long_all6[,i]),]
+}
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# Ensure that ordering is the same in all datasets (otherwise there may be artefactual differences when comparing the RF results)
+order = df$Sample
+df2 = df2 %>% arrange(match(Sample, order))
+df3 = df3 %>% arrange(match(Sample, order))
+df4 = df4 %>% arrange(match(Sample, order))
+df5 = df5 %>% arrange(match(Sample, order))
+df6 = df6 %>% arrange(match(Sample, order))
+```
+
+# Save datasets
+
+```{r Status}
+write.csv(df %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)),
+          '../Reference Files/FOR RF - Status - Taxonomy.csv',row.names=F)
+write.csv(df2 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)),  
+          '../Reference Files/FOR RF - Status - MetaCyc.csv',row.names=F)
+write.csv(df3 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)),
+          '../Reference Files/FOR RF - Status - KO.csv',row.names=F)
+write.csv(df4 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)), 
+          '../Reference Files/FOR RF - Status - COG.csv',row.names=F)
+write.csv(df5 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)), 
+          '../Reference Files/FOR RF - Status - EC.csv',row.names=F)
+write.csv(df6 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)), 
+          '../Reference Files/FOR RF - Status - Metabolites.csv',row.names=F)
+write.csv(df6 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day)) %>%  
+            select(-contains('Unknown_')),
+          '../Reference Files/FOR RF - Status - Metabolites - Annotated Only.csv',row.names=F)
+```
+
+```{r Progression}
+write.csv(long_all %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd),
+          '../Reference Files/FOR RF - Progression - Taxonomy.csv',row.names=F)
+write.csv(long_all2 %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd), 
+          '../Reference Files/FOR RF - Progression - MetaCyc.csv',row.names=F)
+write.csv(long_all3 %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd),
+          '../Reference Files/FOR RF - Progression - KO.csv',row.names=F)
+write.csv(long_all4 %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd), 
+          '../Reference Files/FOR RF - Progression - COG.csv',row.names=F)
+write.csv(long_all5 %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd), 
+          '../Reference Files/FOR RF - Progression - EC.csv',row.names=F)
+write.csv(long_all6 %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd), 
+          '../Reference Files/FOR RF - Progression - Metabolites.csv',row.names=F)
+write.csv(long_all6 %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd) %>% select(-contains('Unknown_')),
+          '../Reference Files/FOR RF - Progression - Metabolites - Annotated Only.csv',row.names=F)
+```
+```{r Numbers for Figure S1}
+# Random Forest of Status
+status = readxl::read_xlsx('../Reference Files/RF Training Samples.xlsx') %>% pull(Sample)
+temp=df %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day))
+table(temp$Status,temp$Sample %in% status)
+
+# Random Forest of Status - Metabolites
+status = readxl::read_xlsx('../Reference Files/RF Training Samples - Metabolites.xlsx') %>% pull(Sample)
+temp=df6 %>% filter(!is.na(bristol),!is.na(smokeprev_or_before_pd), !is.na(coffee_per_day))
+table(temp$Status,temp$Sample %in% status)
+
+# Random Forest of Progression
+status = readxl::read_xlsx('../Reference Files/RF Training Samples - Prog.xlsx') %>% pull(Sample)
+temp=long_all %>% filter(!is.na(bristol),!is.na(coffee_per_day)) %>% select(-smokeprev_or_before_pd)
+table(temp$Progression,temp$Sample %in% status)
+```
+

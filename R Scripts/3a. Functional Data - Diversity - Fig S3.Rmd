@@ -1,0 +1,205 @@
+---
+title: "3a. Functional Data - Diversity"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(ggpubr)
+library(data.table)
+library(vegan)
+library(tidyverse)
+gc()
+
+# This rds file contains all four functional datasets (KO, COG, EC, MetaCyc).
+ps = readRDS('../Reference Files/functional_phyloseq_rarefied.rds')
+
+# Extract metadata from metacyc phyloseq
+s = psmelt(ps$pwy) %>% select(-OTU,-Abundance,-any_of(c('Kingdom','Phylum','Class','Order',
+                                                    'Family','Genus','Species'))) %>% unique
+```
+
+# DIVERSITY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r Set up}
+otulist = lapply(ps,function(x) x@otu_table %>% as.matrix %>% as.data.frame)
+```
+
+## ALPHA DIVERSITY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Using Shannon for alpha diversity.
+
+```{r Alpha Diversity}
+# This function will be run on each of the functional datasets.
+
+run_alpha = function(x){
+
+  # x = otulist[[1]]
+  
+  # Use Vegan package to calculate diversity
+  df_alpha <- diversity(t(x), index='shannon', MARGIN = 1, base = exp(1)) %>%
+    as.data.frame()
+  df_alpha$Sample = rownames(df_alpha)
+  df_alpha = df_alpha %>% left_join(s %>% select(Sample,Status,depth,Sex,laxatives))
+  names(df_alpha)[1] = 'shannon'
+  
+  # Statistics
+  g = summary(glm(shannon~Status+Sex+laxatives+depth,data = df_alpha))$coefficients
+  w = wilcox.test(shannon~Status, data = df_alpha) %>% broom::tidy()
+
+  # Save results
+  alphalist <<- alphalist %>% append(list(df_alpha))
+  glmlist <<- glmlist %>% append(list(g))
+  wilcoxlist <<- wilcoxlist %>% append(list(w))
+}
+
+# Prep some empty lists
+alphalist = list()
+glmlist = list()
+wilcoxlist = list()
+
+# Run alpha diversity analysis
+lapply(otulist,run_alpha)
+
+# Edit outputs
+names(alphalist) = c('COG Enzymes','KEGG','EC','MetaCyc')
+names(glmlist) = c('COG Enzymes','KEGG','EC','MetaCyc')
+names(wilcoxlist) = c('COG Enzymes','KEGG','EC','MetaCyc')
+
+# Format univariate results
+wilcoxlist = wilcoxlist %>% lapply(function(x) x %>% as.data.frame() %>% mutate(Variable='Status'))
+for(i in 1:4){wilcoxlist[[i]] = wilcoxlist[[i]] %>% mutate(Type = names(wilcoxlist)[i])}
+
+# Format multivariate results
+glmlist = glmlist %>% lapply(function(x) x %>% as.data.frame() %>% rownames_to_column('Variable'))
+for(i in 1:4){glmlist[[i]] = glmlist[[i]] %>% mutate(Type = names(glmlist)[i])}
+
+# Output of all GLM data
+glmall = bind_rows(glmlist) %>% select(Type,everything()) %>% 
+  group_by(Variable) %>% mutate(qval = p.adjust(`Pr(>|t|)`)) %>% ungroup() %>% arrange(qval)
+
+# Output of all Wilcoxon data
+wilall = bind_rows(wilcoxlist) %>%
+  group_by(Variable) %>% mutate(qval = p.adjust(p.value),.after='p.value') %>% ungroup() %>% arrange(qval)
+```
+
+## BETA DIVERSITY ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Using Bray-Curtis for beta diversity.
+
+```{r Beta Univariate}
+run_beta = function(x){
+  print('Starting...')
+  # x = otulist$pwy
+  
+  # Calculate the distance matrix:
+  beta_dist <- vegdist(t(x), index = 'bray')
+  # Scaling results with NMDS
+  mds <- metaMDS(beta_dist)
+  # Extract PCoA axes and format
+  mds_data <- as.data.frame(mds$points)
+  mds_data$`Sample` <- rownames(mds_data)
+  mds_data <- mds_data %>% left_join(s %>% select(Sample,Status,depth,Sex,laxatives)) %>% 
+    mutate(beta_type = 'Bray-Curtis')
+  
+  # Plot results
+  p = ggplot(mds_data, aes(x = MDS1, y = MDS2, color = Status)) +
+      geom_point(size = 2) + 
+      stat_ellipse(size = 1) +
+      theme_classic(base_size = 20) + 
+      xlab('PCoA 1') + ylab('PCoA 2') +
+      ggtitle('Bray-Curtis Beta Diversity')
+  
+  # Univariate Statistics
+  g1 = adonis2(beta_dist ~ Status, data = mds_data)
+  md2 = mds_data %>% filter(!is.na(laxatives),!is.na(Sex),!is.na(depth))
+  bd2 = t(x);bd2 = bd2[rownames(bd2) %in% md2$Sample,]
+  g2 = adonis2(bd2 ~ Status+Sex+laxatives+depth, 
+               data = md2, method = 'bray', by='margin')
+  
+  plotbeta <<- plotbeta %>% append(list(p))
+  betalist <<- betalist %>% append(list(mds_data))
+  glmbeta <<- glmbeta %>% append(list(g1))
+  glmbeta.m <<- glmbeta.m %>% append(list(g2))
+}
+
+plotbeta = list()
+betalist = list()
+glmbeta = list()
+glmbeta.m = list()
+
+lapply(otulist,run_beta)
+
+names(plotbeta) = c('COG Enzymes','KEGG','EC','MetaCyc')
+names(betalist) = c('COG Enzymes','KEGG','EC','MetaCyc')
+names(glmbeta) = c('COG Enzymes','KEGG','EC','MetaCyc')
+names(glmbeta.m) = c('COG Enzymes','KEGG','EC','MetaCyc')
+
+# Add descriptive y axes
+for(i in names(plotbeta)){
+  plotbeta[[i]]$labels$title = i
+}
+
+# Beta Statistics
+
+glmbeta = glmbeta %>% lapply(function(x) x %>% as.data.frame() %>% rownames_to_column('Variable'))
+glmbeta.m = glmbeta.m %>% lapply(function(x) x %>% as.data.frame() %>% rownames_to_column('Variable'))
+for(i in 1:length(glmbeta)){
+  glmbeta[[i]] = glmbeta[[i]] %>% mutate(Type = names(glmbeta)[i])
+  glmbeta.m[[i]] = glmbeta.m[[i]] %>% mutate(Type = names(glmbeta.m)[i])
+}
+
+# Output of all GLM data
+glmbetaall = bind_rows(glmbeta) %>% select(Type,everything()) %>% filter(!(Variable %in% c('Residual','Total'))) %>% 
+  mutate(qval = p.adjust(`Pr(>F)`,method='fdr') %>% round(3)) %>% arrange(`Pr(>F)`)
+glmbetaall.m = bind_rows(glmbeta.m) %>% select(Type,everything()) %>% filter(!(Variable %in% c('Residual','Total'))) %>% 
+  group_by(Variable) %>% 
+  mutate(qval = p.adjust(`Pr(>F)`,method='fdr') %>% round(3)) %>% ungroup() %>% arrange(`Pr(>F)`)
+```
+
+# SAVE STATS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+writexl::write_xlsx(list('Shannon Diversity Univariate' = wilall,
+                         'Shannon Diversity Multivariate' = glmall,
+                         'Bray-Curtis Univariate' = glmbetaall, 
+                         'Bray-Curtis Multivariate' = glmbetaall.m),
+                    '../Results/Supplementary Data/Diversity of Functional Data.xlsx')
+```
+
+# SAVE PLOTS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+temp = plotbeta
+temp$`COG Enzymes` = temp$`COG Enzymes` + 
+  annotate(geom='text', x=-0.25, y=0.25, size = 5, 
+           label=paste0('Univar: q=',round(glmbetaall$qval[glmbetaall$Type=='COG Enzymes'],2))) + 
+  annotate(geom='text', x=-0.23, y=0.18, size = 5, 
+           label=paste0('Multivar: q=',
+                        round(glmbetaall.m$qval[glmbetaall.m$Type=='COG Enzymes' & glmbetaall.m$Variable=='Status'],2)))
+temp$`MetaCyc` = temp$`MetaCyc` + 
+  annotate(geom='text', x=-0.05, y=0.14, size = 5, 
+           label=paste0('Univar: q=',round(glmbetaall$qval[glmbetaall$Type=='MetaCyc'],2))) + 
+  annotate(geom='text', x=-0.03, y=0.1, size = 5, 
+           label=paste0('Multivar: q=',
+                        round(glmbetaall.m$qval[glmbetaall.m$Type=='MetaCyc' & glmbetaall.m$Variable=='Status'],2)))
+temp$`EC` = temp$`EC` + 
+  annotate(geom='text', x=-0.05, y=0.17, size = 5, 
+           label=paste0('Univar: q=',round(glmbetaall$qval[glmbetaall$Type=='EC'],2))) + 
+  annotate(geom='text', x=-0.03, y=0.13, size = 5, 
+           label=paste0('Multivar: q=',
+                        round(glmbetaall.m$qval[glmbetaall.m$Type=='EC' & glmbetaall.m$Variable=='Status'],2)))
+temp$`KEGG` = temp$`KEGG` + 
+  annotate(geom='text', x=-0.14, y=0.27, size = 5, 
+           label=paste0('Univar: q=',round(glmbetaall$qval[glmbetaall$Type=='KEGG'],2))) + 
+  annotate(geom='text', x=-0.12, y=0.18, size = 5, 
+           label=paste0('Multivar: q=',
+                        round(glmbetaall.m$qval[glmbetaall.m$Type=='KEGG' & glmbetaall.m$Variable=='Status'],2)))
+
+ggarrange(plotlist=temp, common.legend = T)
+
+ggsave('../Results/Supplementary Figures/Fig. S3 - Functional Beta Diversity.png',width = 8,height=8)
+```
+

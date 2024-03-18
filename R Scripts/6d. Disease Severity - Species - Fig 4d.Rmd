@@ -1,0 +1,212 @@
+---
+title: "6d. Disease Severity - Species - Fig 4c"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(scales)
+
+# Taxonomy Data - CLR transformed
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% microbiome::transform('clr')
+# Load functions that allow high-throughput Spearman & GLM analysis
+source('999. Cross-Sectional Correlation Functions.R')
+```
+
+```{r Prep dataset}
+# Load sig taxa
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx',sheet='Species') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the species to test
+# Include F. prausnitzii because of its strong association with 
+#  Ctrl-associated pathways (Table 2)
+sig = c(temp2[['Species']],'s__Faecalibacterium_prausnitzii')
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-any_of(other_levels),-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  select(-any_of(c('bdi_total','fss_total','mds1.total','mds2.total','mds3.total','mds4.total','mds.total','levo.eq.dose')))
+
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+long = long0 %>% filter(months_last_visit==0) %>% unique()
+
+# Combine with CRP and metabolomic data
+psm = psm %>% left_join(long)
+
+# Filter for only PD
+psm = psm %>% filter(Status=='PD')
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Univariate Analysis
+
+```{r, include=FALSE}
+spearman = correlate_met(psm %>% filter(!is.na(mds1.total),!is.na(Disease.duration)),
+                         'mds1.total',grp=NA) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds2.total),!is.na(Disease.duration)),
+                          'mds2.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds3.total),!is.na(Disease.duration)),
+                          'mds3.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds4.total),!is.na(Disease.duration)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds.total),!is.na(Disease.duration)),
+                           'mds.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(bdi_total),!is.na(Disease.duration)),
+                           'bdi_total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(fss_total),!is.na(Disease.duration)),
+                           'fss_total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(levo.eq.dose),!is.na(Disease.duration)),
+                           'levo.eq.dose',grp=NA))
+```
+
+# Multivariate Analysis
+
+```{r}
+glm = glm_met_severity(psm %>% filter(!is.na(mds1.total),!is.na(Disease.duration)),
+                           'mds1.total',grp=NA) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds2.total),!is.na(Disease.duration)),
+                           'mds2.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds3.total),!is.na(Disease.duration)),
+                           'mds3.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds4.total),!is.na(Disease.duration)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds.total),!is.na(Disease.duration)),
+                           'mds.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(bdi_total),!is.na(Disease.duration)),
+                           'bdi_total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(fss_total),!is.na(Disease.duration)),
+                           'fss_total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(levo.eq.dose),!is.na(Disease.duration)),
+                           'levo.eq.dose',grp=NA))
+
+# Extract just the relevant rows for plotting
+glm_species = glm %>% filter(str_detect(Explanatory,'Microbe'))
+```
+
+```{r ORDERING}
+order = glm_species %>% filter(Response=='mds.total') %>% 
+  arrange(Estimate)
+order$Taxon = str_remove_all(order$Taxon,'s__') %>% str_replace_all('_',' ')
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Univar Plots
+
+```{r Dot Plot}
+# Edit levels for plotting
+spearman$variable[spearman$variable=='mds.total'] = 'Total UPDRS'
+spearman$variable[spearman$variable=='mds1.total'] = 'UPDRS 1'
+spearman$variable[spearman$variable=='mds2.total'] = 'UPDRS 2'
+spearman$variable[spearman$variable=='mds3.total'] = 'UPDRS 3'
+spearman$variable[spearman$variable=='mds4.total'] = 'UPDRS 4'
+spearman$variable[spearman$variable=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+spearman$variable[spearman$variable=='bdi_total'] = 'Total BDI'
+spearman$variable[spearman$variable=='fss_total'] = 'Total FSS'
+spearman$taxon = str_remove_all(spearman$taxon,'s__') %>% str_replace_all('_',' ')
+
+spearman$variable = factor(spearman$variable,levels = c('Total UPDRS','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4','Levodopa\nEq. Dose','Total BDI','Total FSS'))
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = spearman %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(variable %in% vars) %>% 
+    ggplot(aes(variable,taxon,col = rho)) +
+    geom_point(size =14) +
+    theme_classic(base_size = 16) +
+    scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.25) +
+    geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  return(p)
+}
+
+spearman$taxon = factor(spearman$taxon, levels = order$Taxon)
+
+# Plots
+sp = prep_plot(unique(spearman$variable)) + ggtitle('Baseline Severity')
+sp
+```
+
+# Multivar Plots
+
+```{r Dot Plot}
+# Edit levels for plotting
+glm_species$Response[glm_species$Response=='mds.total'] = 'Total UPDRS'
+glm_species$Response[glm_species$Response=='mds1.total'] = 'UPDRS 1'
+glm_species$Response[glm_species$Response=='mds2.total'] = 'UPDRS 2'
+glm_species$Response[glm_species$Response=='mds3.total'] = 'UPDRS 3'
+glm_species$Response[glm_species$Response=='mds4.total'] = 'UPDRS 4'
+glm_species$Response[glm_species$Response=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+glm_species$Response[glm_species$Response=='bdi_total'] = 'Total BDI'
+glm_species$Response[glm_species$Response=='fss_total'] = 'Total FSS'
+glm_species$Taxon = str_remove_all(glm_species$Taxon,'s__') %>% str_replace_all('_',' ')
+
+glm_species$Response = factor(glm_species$Response,levels =  c('Total UPDRS','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4','Levodopa\nEq. Dose','Total BDI','Total FSS'))
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = glm_species %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(Response %in% vars) %>% 
+    ggplot(aes(Response,Taxon,col = Estimate)) +
+    geom_point(size =14) +
+    theme_classic(base_size = 16) +
+    scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.25) +
+    geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  return(p)
+}
+
+glm_species$Taxon = factor(glm_species$Taxon, levels = order$Taxon)
+
+# Plots
+p = prep_plot(unique(glm_species$Response)) + ggtitle('Baseline Severity')
+p
+```
+
+```{r Save Plots}
+# Univar
+ggarrange(plotlist = list(sp))
+ggsave('../Results/Supplementary Figures/Fig. 4c - Species vs Disease Severity - Univar.png', height=6,width=8)
+
+# Multivar
+ggarrange(plotlist = list(p))
+ggsave('../Results/4. Progression/Fig. 4c - Species vs Disease Severity - Multivar.png',height=6,width=8)
+```
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~
+```{r Save Stats}
+writexl::write_xlsx(list('Univar' = spearman,
+                         'Multivar' = glm,
+                         'Multivar Species' = glm %>% filter(str_detect(Explanatory,'Microbe'))),
+                    '../Results/Supplementary Data/Progression/Species vs Baseline Severity Stats.xlsx')
+```

@@ -1,0 +1,393 @@
+---
+title: "1. Network Analysis with SPIEC-EASI"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Initialize}
+library(phyloseq)
+library(SpiecEasi)
+library(tidyverse)
+library(Matrix)
+library(igraph)
+library(ggpubr)
+```
+
+# Load data
+
+```{r}
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds")
+
+# SPIEC-EASI requires rarefaction.
+ps = ps %>% rarefy_even_depth(rngseed = 421)
+
+# Only keep species with >0.1 prevalence
+rel = ps@otu_table@.Data %>% as.data.frame %>% mutate_all(function(x)x>0) %>% 
+  rowSums %>% as.data.frame(col.names = c('n')) %>% 
+  filter(`.` > 0.1*nsamples(ps))
+ps = prune_taxa(rownames(rel), ps)
+
+ntaxa(ps)
+
+# Subset into disease groups for further analysis
+pd = ps %>% subset_samples(Status=='PD')
+ctrl = ps %>% subset_samples(Status=='Ctrl')
+```
+
+# Create networks
+
+```{r}
+# 50 replicates per group, with 10010 as the seed
+# pargs <- list(rep.num=50, seed=10010)
+
+# Run SPIEC-EASI on PD and ctrl, takes a long time
+# se.mb.pd <- spiec.easi(pd, method='mb', lambda.min.ratio=1e-1,sel.criterion='bstars',
+#                        nlambda=100, pulsar.params=pargs)
+# se.mb.ctrl <- spiec.easi(ctrl, method='mb', lambda.min.ratio=1e-1,sel.criterion='bstars',
+#                          nlambda=100, pulsar.params=pargs)
+# Save results as RDS files so that the analysis can be easily re-run
+# saveRDS(se.mb.pd,'../Results/1. Microbial Network Analysis/spiec_easi_pd.rds')
+# saveRDS(se.mb.ctrl,'../Results/1. Microbial Network Analysis/spiec_easi_ctrl.rds')
+```
+
+# Run Analyses
+
+```{r Create network objects}
+# Load the network data
+se.mb.pd = readRDS('../Reference Files/spiec_easi_pd.rds')
+se.mb.ctrl = readRDS('../Reference Files/spiec_easi_ctrl.rds')
+
+## Create igraph objects for plotting
+ig.pd     <- adj2igraph(getRefit(se.mb.pd), vertex.attr=list(name=taxa_names(ps)))
+ig.ctrl   <- adj2igraph(getRefit(se.mb.ctrl), vertex.attr=list(name=taxa_names(ps)))
+
+## set size of vertex proportional to clr-mean.
+## i.e. the bigger the dot, the more abundant the microbe
+vsize.pd    <- rowMeans(clr(t(pd@otu_table@.Data), 1))+6
+am.coord.pd <- layout.fruchterman.reingold(ig.pd)
+vsize.ctrl    <- rowMeans(clr(t(ctrl@otu_table@.Data), 1))+6
+am.coord.ctrl <- layout.fruchterman.reingold(ig.ctrl)
+```
+
+```{r Extract distance information}
+# Distance is calculated by adding up all the edge lengths along the shortest path from A to B. Note that edge lengths are variable and are dependent on the degree of collinearity between the connected nodes.
+
+dist.pd = distances(
+  ig.pd,
+  mode = "all",
+  algorithm = "automatic"
+) %>% as.data.frame %>% rownames_to_column('V') %>% 
+  pivot_longer(cols = -V, names_to = 'To', values_to = 'Distance') %>% 
+  mutate(Status = 'PD', .before = V)
+
+dist.ctrl = distances(
+  ig.ctrl,
+  mode = "all",
+  algorithm = "automatic"
+) %>% as.data.frame %>% rownames_to_column('V') %>% 
+  pivot_longer(cols = -V, names_to = 'To', values_to = 'Distance') %>% 
+  mutate(Status = 'Ctrl', .before = V)
+
+dist = dist.pd %>% rbind(dist.ctrl) %>% 
+  # Infinite distances mean that the two nodes are not connected via the network.
+  mutate(Connected = ifelse(is.infinite(Distance),'No','Yes'),Comparison = paste0(V,':',To)) %>% 
+  # Remove self associations (either one of these should work, but I'm paranoid)
+  filter(Distance !=0) %>% filter(V != To) %>%
+  # Initialize 'connection' column for next bit of code
+  mutate(connection = NA)
+
+# Sort each pair of taxa alphabetically - this will allow me to remove duplicates that were created by including reverse directions. Essentially I just want one representative from each possible connection.
+for(i in 1:nrow(dist)){
+  # i=2
+  s = sort(c(dist$V[i],dist$To[i]))
+  dist$connection[i] = paste0(s[1],s[2])
+}
+
+# Remove duplicate reads (i.e. we don't need b-a if we have a-b)
+dist_all = dist # The duplicate reads are still useful for plotting per-phylum distances, as I can just filter a single column for the phylum of interest (otherwise it's spread across 2 columns)
+dist = dist %>% dplyr::select(Status,Distance,Connected,connection) %>% unique()
+
+# Change infinite distance (there is no path connecting them and therefore have NaN values) to 1.5*max.
+# Because we use nonparametric tests, it makes no statistical difference if we use 1.5 or something much larger, but 1.5 is good for plot visualization.
+
+infval = max(dist$Distance[!is.infinite(dist$Distance)],na.rm=T)*1.5
+
+dist.noinf = dist %>% mutate(Distance = ifelse(is.infinite(Distance),infval,Distance))
+dist_all.noinf = dist_all %>% mutate(Distance = ifelse(is.infinite(Distance),infval,Distance))
+```
+
+```{r Calculate Betweenness Centrality}
+bw.pd = betweenness(
+  ig.pd,
+  v = V(ig.pd),
+  cutoff = -1
+) %>% as.data.frame()
+
+bw.ctrl = betweenness(
+  ig.ctrl,
+  v = V(ig.ctrl),
+  cutoff = -1
+) %>% as.data.frame()
+
+bw = tibble(Status='PD',Taxon = rownames(bw.pd),Betweenness = bw.pd$.) %>% 
+  rbind(tibble(Status='Ctrl',Taxon = rownames(bw.ctrl),Betweenness = bw.ctrl$.)) %>% 
+  left_join(ps@tax_table@.Data %>% as.data.frame %>% rownames_to_column('Taxon'))
+```
+
+```{r Calculate Closeness Centrality}
+# Closeness centrality is a measure of the average distance from a node of interest to all other connected nodes. To make it more intuitive, this metric is always reported as the INVERSE distance so that HIGHER numbers indicate that the taxon is CLOSER to its neighbours.
+
+close.pd = closeness(
+  ig.pd,
+  vids = V(ig.pd), # Input all vertices
+  mode = 'all', # Use all paths
+  normalized = TRUE, # Average, not sum, of distances
+  cutoff = -1 # No path length limit - all paths analyzed
+) %>% as.data.frame %>% rownames_to_column('V') %>% 
+  mutate(Status = 'PD', .before = V)
+
+close.ctrl = closeness(
+  ig.ctrl,
+  vids = V(ig.ctrl),
+  mode = 'all',
+  normalized = TRUE,
+  cutoff = -1
+) %>% as.data.frame %>% rownames_to_column('V') %>% 
+  mutate(Status = 'Ctrl', .before = V)
+
+close = close.pd %>% rbind(close.ctrl) %>% rename(Taxon = V) %>% 
+  left_join(ps@tax_table@.Data %>% as.data.frame %>% rownames_to_column('Taxon'))
+names(close)[3] = 'Closeness'
+
+# Change infinite values to 0.5*min (these are taxa that aren't connected)
+# Remember that higher closeness indicates that it is more closely associated with its neighbours, so we need lower values here
+infval = min(close$Closeness,na.rm=T)*(0.5)
+close.noinf = close %>% mutate(Closeness = ifelse(is.nan(Closeness),infval,Closeness))
+
+# The range of values is unbalanced, so we're going to log transform the values to improve our plot.
+close.noinf = close.noinf %>% mutate(Closeness = log10(Closeness))
+```
+
+# Fig. 1a - Overall Network Graphs
+
+```{r}
+cbPalette <- c("#D55E00", "#E69F00", "#009E73", "#33CCFF", "#BBBBBB", '#000000')
+
+# Plot results, colour by Phylum
+p1 = plot_network(ig.pd, ps, type='taxa', color="Phylum",label = NA, title = 'PD',point_size = vsize.pd-2.5) +
+  scale_colour_manual(values=cbPalette)
+p2 = plot_network(ig.ctrl, ps, type='taxa', color="Phylum",label = NA, title = 'Ctrl',point_size = vsize.ctrl-2.5) +
+  scale_colour_manual(values=cbPalette)
+ggpubr::ggarrange(plotlist=list(p1,p2),common.legend = T, legend = 'right')
+ggsave('../Results/1. Microbial Network Analysis/Fig. 1a - Networks.png', height = 5, width = 10)
+```
+
+# Fig. 1b - Proportion of existing connections vs total possible connections
+
+```{r}
+# dist contains one row for each possible taxon-taxon connection.
+
+# Tally how many connecctions are present vs absent per condition
+dist_0 = dist %>% group_by(Status,Connected) %>% tally() %>% 
+  pivot_wider(names_from = Status,values_from = n) %>%
+  column_to_rownames('Connected')
+sum(dist_0$Ctrl) # of possible connections
+dist.chi = chisq.test(dist_0); dist.chi
+
+dist %>% group_by(Status,Connected) %>% tally() %>% 
+  ggplot(aes(Status,n,fill = Connected)) +
+  geom_col(position = 'stack') +
+  theme_classic(base_size = 20) +
+  xlab(NULL) +ylab('# Taxon-Taxon Connections') +
+  # Add p value
+  geom_segment(x = 0.8,xend = 2.2,y=9000,yend=9000, size = 1) +
+  # p value is from 'chi' object
+  geom_text(x = 1.5,y = 9500, label='p < 2.22e-16',size =8) +
+  ylim(0,9500)
+ggsave('../Results/1. Microbial Network Analysis/Fig. 1b - Proportion of Possible Connections.png', height = 5, width = 5.5)
+```
+
+# Fig. 1c - Betweenness Centrality
+
+```{r}
+# For every taxon-taxon connection, their distance is considered to be the length of the shortest path which connects them via any series of edges (distances) and nodes (microbes).
+# Betweenness centrality is the number of shortest paths that traverse the node of interest.
+# High betweenness centrality values indicate that the node is more important for the overall network structure, as it supports a greater number of connections.
+# Example: A bus station in the middle of town that allows passengers to connect to any bus line through the city has higher betweenness centrality than a bus station on the edge of the city limits.
+
+bw.wilcox = wilcox.test(Betweenness~Status, 
+                        data = bw %>% arrange(Species) %>% 
+                          mutate(Status = factor(Status, levels = c("PD","Ctrl"))),
+                        paired=T,conf.int = T) %>% unlist %>% as.data.frame %>% rownames_to_column('Parameter') %>% mutate(Test = 'Betweenness')
+names(bw.wilcox)[2] = 'Value'
+
+# Strong overall differences
+bw %>% ggplot(aes(Status,Betweenness,fill = Status)) +
+  geom_violin(adjust = 2, draw_quantiles = 0.5,size = 1) +
+  geom_jitter(height = 0.5, width = 0.2) +
+  theme_classic(base_size = 20) +
+  xlab(NULL) + ylab('Betweenness Centrality') +
+  geom_line(aes(group = Species)) +
+  theme(legend.position = 'none') +
+  stat_compare_means(method='wilcox',comparisons = list(c('PD','Ctrl')),
+                     label = 'p.format', paired = T,size = 8) +
+  ylim(-10,2100)
+ggsave('../Results/1. Microbial Network Analysis/Fig. 1c - Betweenness Centrality.png', height = 5, width = 4.5)
+```
+
+# Fig. 1d - Closeness Centrality
+
+```{r}
+close.wilcox = wilcox.test(Closeness~Status, 
+                           data = close.noinf %>% arrange(Species) %>% 
+                             mutate(Status = factor(Status, levels = c("PD","Ctrl"))),
+                           paired=T,conf.int = T) %>% unlist %>% as.data.frame %>% rownames_to_column('Parameter') %>% mutate(Test = 'Closeness')
+names(close.wilcox)[2] = 'Value'
+
+close.noinf %>% 
+  ggplot(aes(Status,Closeness,fill = Status)) +
+  geom_violin(adjust = 2, draw_quantiles = 0.5,size = 1) +
+  geom_jitter(height = 0, width = 0.2) +
+  theme_classic(base_size = 20) +
+  xlab(NULL) + ylab('Closeness Centrality') +
+  geom_line(aes(group = Species)) +
+  ylim(-1.25,0.1) +
+  theme(legend.position = 'none') +
+  stat_compare_means(method='wilcox',comparisons = list(c('PD','Ctrl')),
+                     label = 'p.format', paired = T,size = 8)
+ggsave('../Results/1. Microbial Network Analysis/Fig. 1d - Closeness Centrality.png', height = 5, width = 4.5)
+```
+
+# Fig. 1e - All Non-Infinite Node-Node Distances
+
+```{r}
+# This measure is similar to closeness centrality, where it is a representation of the distances between each node. However, it differs in the following way:
+# - Closeness centrality: one value per node. Collapses all relevant pathways into a single average value. Emphasis is therefore on nodes, and so is vulnerable to skewing as the number of pathways per point is variable.
+# - This figure: every node-node connection is given equal weight. Better overall representation of all pathways in the dataset.
+
+dist.wilcox = wilcox.test(Distance~Status,
+                          data = dist_all.noinf,                           paired=F,conf.int = T) %>% unlist %>% as.data.frame %>%
+  rownames_to_column('Parameter') %>% mutate(Test = 'Distance')
+names(dist.wilcox)[2] = 'Value'
+
+# dist_all.noinf: contains all pathway distances, with all self associations, duplicates removed. Infinite values were assigned a value of 1.5* the maximum non-infinite value for our other distance plot, so we will filter these out (infinite = not connected via the network)
+dist_all.noinf %>% 
+  filter(Distance<18) %>% # remove infinites
+  ggplot(aes(Status,Distance,fill = Status)) +
+  geom_violin(adjust = 3, draw_quantiles = 0.5,size = 1) +
+  theme_classic(base_size = 20) +
+  xlab(NULL) + ylab('Taxon-Taxon Distance (Non-Inf)') +
+  theme(legend.position = 'none') +
+  stat_compare_means(method = 'wilcox',comparisons = list(c('PD','Ctrl')),
+                     label = 'p.format', paired = F,size = 8) +
+  ylim(0,14)
+ggsave('../Results/1. Microbial Network Analysis/Fig. 1e - Taxon-Taxon Distances.png', height = 5, width = 4.5)
+```
+
+# Fig. S2 - Phylum-Specific Betweenness Centrality
+
+```{r}
+bw.wilcox.phylum = bw %>% group_by(Phylum) %>% add_tally() %>% 
+  filter(n>2) %>% 
+  mutate(Status = factor(Status, levels = c("PD","Ctrl"))) %>% 
+    group_modify(~ broom::tidy(
+          wilcox.test(Betweenness ~ Status, data = .,
+             paired = T, conf.int=T))) %>%
+    ungroup() %>% 
+  mutate(qval = p.adjust(p.value,method='BH'),.after='p.value')
+table(bw$Status,bw$Phylum)
+# Phylum-specific differences
+bw %>% group_by(Phylum) %>% add_tally %>%
+  # Phyla with four or fewer taxa will be removed, as there just isn't enough statistical power to be meaningful. This ends up removing just two phyla, both with n=2 species. The next highest has n=14.
+  mutate(Phylum = ifelse(n>4,Phylum,'Other')) %>% ungroup() %>% 
+  filter(Phylum != 'Other') %>% # Remove other taxa
+  ggplot(aes(Status,Betweenness,fill = Status)) +
+  geom_violin(adjust = 2, draw_quantiles = 0.5,size = 1) +
+  geom_jitter(height=0.1,width =0.1) +
+  geom_line(aes(group=Species)) +
+  theme_classic(base_size = 20) +
+  xlab(NULL) + ylab('Betweenness Centrality') +
+  theme(legend.position = 'none') +
+  ylim(-10,2200) +
+  geom_text(aes(x=1.2,y=2000, label=paste0('q = ',round(qval,2))),
+            data = bw.wilcox.phylum, inherit.aes=F,size = 5,lineheight=0.8,hjust=0) +
+  facet_wrap('Phylum')
+ggsave('../Results/Supplementary Figures/Fig. S2 - Betweenness Centrality - Phylum.png', height = 5, width = 5.3)
+```
+
+# (No Figure) Number of taxa with zero connections
+
+This is mentioned in the manuscript.
+
+```{r Calculate Degree (# of edges per node)}
+len.pd = c(); len.ctrl = c() # Number of edges
+names.pd = c(); names.ctrl = c() # Species
+
+for(i in 1:length(ig.pd)){
+  # i=1
+  x = ig.pd[[i]]
+  names.pd <- c(names.pd,names(x))
+  len.pd <- c(len.pd,length(x[[1]]))
+}
+
+for(i in 1:length(ig.ctrl)){
+  # i=1
+  x = ig.ctrl[[i]]
+  names.ctrl <- c(names.ctrl,names(x))
+  len.ctrl <- c(len.ctrl,length(x[[1]]))
+}
+
+# Combine into table, add taxonomy info
+degree.all = tibble(Status = 'PD', Taxon = names.pd, Connections = len.pd) %>% 
+  rbind(tibble(Status = 'Ctrl', Taxon = names.ctrl, Connections = len.ctrl)) %>% 
+  left_join(ps@tax_table@.Data %>% as.data.frame() %>% rownames_to_column('Taxon'))
+```
+
+## Proportion of species with no connections (Degree = 0)
+
+```{r}
+# tally up
+degree_0 = degree.all %>% 
+  mutate(Connected = ifelse(Connections==0,'No','Yes')) %>% 
+  group_by(Status,Connected) %>% tally() %>% 
+  pivot_wider(names_from = Status,values_from = n) %>%
+  column_to_rownames('Connected')
+
+# 12 unconnected in Ctrl, 21 in PD, out of 133 total species
+degree.chi = chisq.test(degree_0); degree.chi
+```
+
+# Save all statistics
+
+```{r}
+# Fig. 1a - list of microbes included in analysis
+taxa = taxa_names(ps) %>% as.data.frame() %>% 
+  `colnames<-`('OTU') %>% 
+  separate(col = OTU, sep = '-', remove = F,
+           into = c('Kingdom','Phylum','Class','Order','Family','Genus','Species'))
+
+L = list('Species Included' = taxa,
+         'Fig. 1b' = dist.chi %>% broom::tidy(),
+         'Fig. 1c' = bw.wilcox,
+         'Fig. 1d' = close.wilcox,
+         'Fig. 1e' = dist.wilcox,
+         'Fig. S2' = bw.wilcox.phylum,
+         'No Figure (Prop. 0-edge nodes)' = degree.chi %>% broom::tidy()) %>% 
+  lapply(as.data.frame)
+
+writexl::write_xlsx(L,path = '../Results/Supplementary Data/Network Analysis/Network Analysis Statistics.xlsx')
+```
+
+# Save all connections
+
+```{r}
+L = list('Betweenness Centrality' = bw,
+         'Closeness Centrality' = close,
+         # Note that this contains the entire 'square' of the two-way comparison - 
+         # in other words, self connections (the diagonal) are included, and each 
+         # connection is represented twice per PD/Ctrl (forward and backward)
+         'Taxon-Taxon Distances' = dist_all)
+writexl::write_xlsx(L,path = '../Results/Supplementary Data/Network Analysis/Network Analysis Species-Level Data.xlsx')
+```
+

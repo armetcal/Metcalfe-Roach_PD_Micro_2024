@@ -1,0 +1,174 @@
+---
+title: "3c. Enrichment Analysis - COG Enzymes"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(ggpubr)
+library(phyloseq)
+library(tidyverse)
+
+# This function is a little different from the one in "999. Differential Abundance Functions.R" - instead of using a list of the the raw tool outputs as the main input, it uses the curated stats table that is available in the Supplementary.
+combine_da_results = function(u,var = 'StatusPD',mintools = 2,alpha=0.05,stat='p_val'){
+  # u=m1
+  # mintools = 2;alpha=0.05;stat='p_val'
+  
+  u = u %>% filter(Variable==var)
+  # Determine which microbes are significant, and in how many datasets
+  if(stat=='q_val'){
+    sig = u %>% mutate(sig = as.numeric(q_val<alpha))
+    all2 = u %>% filter(q_val<alpha) %>% select(all_of(names(u)[1]),association_dir) %>% unique
+  } else if(stat=='p_val'){
+    sig = u  %>% mutate(sig = as.numeric(p_val<alpha))
+    all2 = u %>% filter(p_val<alpha) %>% select(all_of(names(u)[1]),association_dir) %>% unique
+  } else {print('stat must be "q_val" or "p_val".')}
+  
+  if(!(length(unique(all2[,1] %>% unname %>% unlist))==nrow(all2))){
+    print('ERROR: ASSOCIATION DIRECTIONS ARE DIFFERENT')
+  }
+  
+  sig = sig %>% 
+    dplyr::select(all_of(names(u)[1]), DA,Variable,sig) %>%
+    pivot_wider(names_from = DA, values_from = sig)
+  sig$total_sig = apply(sig[,3:ncol(sig)],1,sum)
+  sig = sig %>% mutate(sig_in_at_least_n = as.numeric(total_sig>=mintools)) %>% 
+    left_join(all2)
+  
+  return(sig %>% arrange(-sig_in_at_least_n))
+}
+```
+
+```{r}
+# Set pval threshold
+pval_cutoff = 0.15
+
+# Extract association directions of significant hits
+u1 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/COG Enzymes_Stats2.xlsx',sheet='univar') %>% 
+  combine_da_results(alpha=pval_cutoff,stat='p_val')
+length(unique(u1$Species)) == nrow(u1) # True if no conflicting results
+
+m1 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/COG Enzymes_Stats2.xlsx',sheet='multivar') %>% 
+  combine_da_results(alpha=pval_cutoff,stat='p_val') %>% filter(sig_in_at_least_n==T)
+length(unique(m1$Species)) == nrow(m1) # True if no conflicting results 
+
+# Change sig to ns if it's not significant in model
+maas = u1 %>% mutate(sig_in_at_least_n = ifelse(Species %in% m1$Species, sig_in_at_least_n,0))
+
+# See how many significant hits we get
+# There are 233 hits that are under the p value threshold, and 2655 that are under.
+# Good ratio for enrichment.
+table(maas$sig_in_at_least_n)
+```
+
+# ORTHOLOGY ~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+# Hierarchy data - extract only COG terms that are present in dataset
+brite = read.csv('../Reference Files/COG_key.csv')
+
+# Extract KO data
+df = maas %>% separate(col=Species,sep=': ',into = c('COG','desc')) %>% 
+  # Select everything in the COG database, as annotated in 'brite'
+  filter(COG %in% brite$COG)
+
+# Filter BRITE to only include annotations present in dataset
+brite = brite %>% filter(COG %in% df$COG)
+length(unique(brite$COG)) == nrow(df) # Make sure there are no duplicates
+```
+
+```{r KEGG Fisher function}
+allsig = df %>% filter(sig_in_at_least_n==1)
+
+# Total COG terms left:
+total_COG = unique(df$COG) %>% length
+# Total COG terms that are significant in at least 2 tools (p<0.05):
+total_pos = length(allsig$COG[allsig$association_dir=='Positive'])
+total_neg = length(allsig$COG[allsig$association_dir=='Negative'])
+# Total NONsignificant terms
+total_notpos = total_COG-total_pos
+total_notneg = total_COG-total_neg
+```
+
+```{r}
+
+# This function runs a Fisher's exact test on the category of interest.
+
+# level: hierarchal level. Not relevant for COG.
+# brite_cat: a list of all COG categories being tested
+# min_terms: the minimum number of COG enzymes required in order to test a category.
+run_fisher = function(level,brite_cat,min_terms=10){
+  level = 'Cat';brite_cat = brite$Cat %>% unique();min_terms = 8
+  f = tibble()
+  for(test_cat in brite_cat){
+    # test_cat = 'T'
+    # Select all COG that are part of the desired pathway
+    # Filter for unique, because there could be multiple lower-level pathways mapping to the same pathway.
+    # BRITE has been filtered to only include ko terms present in dataset.
+    relevant_COG = brite$COG[brite[[level]] == test_cat] %>% unique()
+    pwy_COG = length(relevant_COG)
+    
+    # Only run stats test if there are enough terms in the pathway to justify it.
+    if(pwy_COG>=min_terms){
+          # How many hits are positive and negative?
+          pwy_pos = length(allsig$COG[allsig$COG %in% relevant_COG &
+                                          allsig$association_dir=='Positive'] %>% unique())
+          pwy_neg = length(allsig$COG[allsig$COG %in% relevant_COG &
+                                          allsig$association_dir=='Negative'] %>% unique())
+          # How many are NOT positive or NOT negative?
+          pwy_notpos = pwy_COG-pwy_pos # Includes sig neg
+          pwy_notneg = pwy_COG-pwy_neg # Includes sig pos
+          
+          # Create Fisher tables
+          dat.pos <- data.frame( #ifelse is in case there are no true or no false hits.
+                "NS" = c(total_notpos-pwy_notpos,pwy_notpos),
+                "Sig" = c(total_pos-pwy_pos, pwy_pos),
+                row.names = c("Background", test_cat),
+                stringsAsFactors = FALSE)
+          dat.neg <- data.frame( #ifelse is in case there are no true or no false hits.
+                "NS" = c(total_notneg-pwy_notneg,pwy_notneg),
+                "Sig" = c(total_neg-pwy_neg, pwy_neg),
+                row.names = c("Background", test_cat),
+                stringsAsFactors = FALSE)
+          
+          # Running one-way Fisher tests - only significant if the number of hits is significantly
+          # LARGER than the background. We don't care about stuff that's signif. lower.
+          f.pos = fisher.test(dat.pos,alternative='greater')[c("p.value","estimate")] %>% unlist()
+          f.neg = fisher.test(dat.neg,alternative='greater')[c("p.value","estimate")] %>% unlist()
+          f = rbind(f,tibble(Dir = "Positive", Test = test_cat, pval = f.pos[1], estimate = f.pos[2],
+                     total_sig = total_pos, total_ns = total_notpos, 
+                     pct_total = 100*total_pos/(total_pos+total_notpos) %>% round(3),
+                     pwy_sig = pwy_pos, pwy_ns = pwy_notpos,  
+                     pct_pwy = 100*pwy_pos/(pwy_pos+pwy_notpos) %>% round(3))) %>% 
+            rbind(tibble(Dir = "Negative", Test = test_cat, pval = f.neg[1], estimate = f.neg[2],
+                     total_sig = total_neg, total_ns = total_notneg, 
+                     pct_total = 100*total_neg/(total_neg+total_notneg) %>% round(3),
+                     pwy_sig = pwy_neg, pwy_ns = pwy_notneg, pct_pwy = 100*pwy_neg/(pwy_neg+pwy_notneg) %>% round(3))) %>% 
+            select(Dir:pval,everything()) %>% arrange(pval)
+    }
+  }
+  
+  # nrow(f) can equal zero if all categories had less than the min number of COG terms
+  if(nrow(f)>0){
+     f = f %>% group_by(Dir) %>% mutate(qval=p.adjust(pval,method='fdr'), Level = level) %>% 
+       ungroup %>% select(Dir,Level, everything())
+  } else { f = tibble() }
+  
+  return(f)
+}
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Run Fisher tests for high levels
+
+```{r All Brite}
+brite_cat = brite$Cat %>% unique()
+f.L1 = run_fisher(level='Cat',brite_cat,min_terms = 8)
+```
+
+```{r Save Results}
+writexl::write_xlsx(list('COG Stats' = f.L1),'../Results/Supplementary Data/Enrichment Analysis/COG2.xlsx')
+```
+

@@ -1,0 +1,194 @@
+---
+title: "3d. Enrichment Analysis - Fig 2c"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load abundance data}
+library(phyloseq)
+library(ggpubr)
+library(data.table)
+library(tidyverse)
+library(glue)
+library(ggtext)
+
+# This contains all the functional data necessary for cross-sectional analysis.
+ps = readRDS("../Reference Files/functional_phyloseq.rds")
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+# Load COG Key
+cog_key = read.csv('../Reference Files/COG_key.csv') %>% 
+  select(Cat,desc) %>% rename(Test=Cat) %>% mutate(desc = str_to_title(desc)) %>% 
+  unique
+# Load sig COG categories
+cog = readxl::read_xlsx('../Results/Supplementary Data/Enrichment Analysis/COG2.xlsx') %>% 
+  filter(qval<0.05) %>% 
+  mutate(Dataset = 'COG') %>% left_join(cog_key) %>% 
+  mutate(Test = desc)
+
+# Load sig KEGG categories
+ko = readxl::read_xlsx('../Results/Supplementary Data/Enrichment Analysis/KO2.xlsx',sheet='KEGG') %>% 
+  filter(qval<0.05) %>% 
+  mutate(Dataset = 'KEGG') %>% 
+  separate(col = Test, into = c('L1','L2','L3','L4'), sep = ' [|] ')
+
+# Load EC key
+ec_key = read.csv('../Reference Files/EC_key_classes.csv')
+# Load sig EC categories
+ec = readxl::read_xlsx('../Results/Supplementary Data/Enrichment Analysis/EC2.xlsx') %>% 
+  filter(qval<0.05) %>% 
+  mutate(Dataset = 'EC')
+
+# Combine datasets and format ~~~~~~~~~~~~~
+enrich = cog %>% full_join(ko) %>% full_join(ec) %>% 
+  mutate(Enrichment = log2(pct_pwy/pct_total),
+         n_pwy = pwy_sig + pwy_ns) %>% 
+  select(Dir,Level,Test,Dataset,L1,L2,L3,L4,Enrichment,n_pwy) %>% 
+  mutate(Test = ifelse(Dataset=='KEGG' & !is.na(L4),L4,
+                       ifelse(Dataset=='KEGG' & !is.na(L3),L3,
+                              ifelse(Dataset=='KEGG' & !is.na(L2),L2,Test)))) %>% 
+  arrange(Level) %>% arrange(L2) %>% arrange(Dataset) %>% 
+  mutate(Enrichment = ifelse(Dir == 'Negative',Enrichment*-1,Enrichment))
+```
+
+```{r Formatting the table}
+# Mainly formatting the names to make it as readable as possible.
+enrich2 = enrich %>% 
+  mutate(cat = ifelse(Dataset=='COG','Category',NA)) %>% 
+  mutate(cat = ifelse(Dataset=='EC' & str_sub(Test,end=1)=='1',
+                      ec_key$class.name[ec_key$Class=='1'] %>% unique,cat)) %>% 
+  mutate(cat = ifelse(Dataset=='EC' & str_sub(Test,end=1)=='2',
+                      ec_key$class.name[ec_key$Class=='2'] %>% unique,cat)) %>% 
+  mutate(cat = ifelse(Dataset=='EC' & str_sub(Test,end=1)=='3',
+                      ec_key$class.name[ec_key$Class=='3'] %>% unique,cat)) %>% 
+  mutate(cat = ifelse(Dataset=='EC' & str_sub(Test,end=1)=='6',
+                      ec_key$class.name[ec_key$Class=='6'] %>% unique,cat)) %>% 
+  mutate(cat = ifelse(Dataset=='KEGG' & L2 == '09120 Genetic Information Processing',
+                      'Gen. Info Processing',cat)) %>% 
+  mutate(cat = ifelse(Dataset=='KEGG' & L2 == '09180 Brite Hierarchies',
+                      'Brite Hierarchies',cat)) %>% 
+  arrange(Test)
+
+# Identify whether or not the test of interest is a child of another sig test
+enrich2$prefix=''
+for(i in 1:nrow(enrich2)){
+  # i = 1
+  t = enrich2$Level[i]
+  if(t!='L1'){ # L1 can't be a child
+    if(enrich2$Dataset[i]=='KEGG'){
+      higher_lvl_n = paste0('L',as.character(as.numeric(str_sub(t,start=2))-1))
+      higher_lvl_val = enrich2[[higher_lvl_n]] %>% .[i]
+      while ((!is.null(higher_lvl_val)) & (higher_lvl_val %in% enrich2$Test)){
+        enrich2$prefix[i] = paste0(enrich2$prefix[i],'\u2192 ')
+        higher_lvl_n = paste0('L',as.character(as.numeric(str_sub(higher_lvl_n,start=2))-1))
+        higher_lvl_val = enrich2[[higher_lvl_n]] %>% .[i]
+      }
+    } else if(enrich2$Dataset[i]=='EC'){
+      split = str_split(enrich2$Test[i],'[.]')[[1]]
+      higher_lvl_val = split[1:length(split)-1] %>% paste(collapse = '.')
+      while ((!is.null(higher_lvl_val)) & (higher_lvl_val %in% enrich2$Test)){
+        enrich2$prefix[i] = paste0(enrich2$prefix[i],'\u2192 ')
+        split = str_split(higher_lvl_val,'[.]')[[1]]
+        higher_lvl_val = split[1:length(split)-1] %>% paste(collapse = '.')
+      }
+    }
+  }
+  
+}
+
+# Transporters is a child of Brite Hierarchies, it just isn't a direct descendant so the above code doesn't work
+enrich2$prefix[enrich2$Test=='02000 Transporters'] = '\u2192 '
+
+enrich2 = enrich2 %>% 
+                # Oxidoreductases
+  mutate(Test = ifelse(Test=='1','1 Oxidoreductases',
+                ifelse(Test=='1.1','1.1 Acting on CH-OH',
+                ifelse(Test=='1.1.1','1.1.1 NAD(+)/NADP(+) acceptor',
+                ifelse(Test=='1.8','1.8 Sulfur donor',
+                # Transferases
+                ifelse(Test=='2','2 Transferases',
+                ifelse(Test=='2.4.2','2.4.2 Pentosyltransferases',
+                ifelse(Test=='2.5','2.5 Non-methyl alkyl/aryl groups',
+                ifelse(Test=='2.5.1','2.5.1 Non-methyl alkyl/aryl groups',
+                ifelse(Test=='2.7','2.7 Phosphorus-containing groups',
+                ifelse(Test=='2.7.2','2.7.2 Carboxy group acceptor',
+                ifelse(Test=='2.7.4','2.7.4 Phosphate group acceptor',
+                ifelse(Test=='2.7.7','2.7.7 Nucleotidyltransferases',
+                ifelse(Test=='2.8','2.8 S-containing groups',
+                ifelse(Test=='2.8.1','2.8.1 Sulfurtransferases',
+                # Hydrolases
+                ifelse(Test=='3.5.4','3.5.4 Acting on cyclic amidine C-N',
+                # Ligases
+                ifelse(Test=='6','6 Ligases',
+                ifelse(Test=='6.1','6.1 Forming C-O bonds',
+                ifelse(Test=='6.1.1','6.1.1 tRNA & related compounds',
+                ifelse(Test=='6.3','6.3 Forming C-N bonds',
+                ifelse(Test=='6.3.4','6.3.4 Other C-N ligases',
+                # KEGG
+                ifelse(Test=='09183 Protein families: signaling and cellular processes','09183 Signaling/Cellular Processes',
+                ifelse(Test=='09182 Protein families: genetic information processing','09182 Gen. Info Processing',
+                ifelse(Test=='09120 Genetic Information Processing','09120 Gen. Info Processing',
+                ifelse(Test=='09130 Environmental Information Processing','09130 Env. Info Processing',Test))))))))))))))))))))))))) %>% 
+  mutate(bold = ifelse(Test %in% c('1 Oxidoreductases',
+                                   '2 Transferases',
+                                   # Because it's the only one
+                                   '3.5.4 Acting on cyclic amidine C-N',
+                                   '6 Ligases',
+                                   # KEGG
+                                   '09180 Brite Hierarchies',
+                                   '09120 Gen. Info Processing',
+                                   # COG
+                                   'Carbohydrate Transport And Metabolism'),
+                       glue("<b>{Test}</b>"),Test)) %>% 
+  arrange(rev(L4)) %>% arrange(rev(L3)) %>% arrange(rev(L2))
+
+order = c(rev(enrich2$bold[enrich2$Dataset=='COG']),
+          rev(enrich2$bold[enrich2$cat=='Oxidoreductases'] %>% sort()),
+          rev(enrich2$bold[enrich2$cat=='Transferases'] %>% sort()),
+          rev(enrich2$bold[enrich2$cat=='Hydrolases'] %>% sort()),
+          rev(enrich2$bold[enrich2$cat=='Ligases'] %>% sort()),
+          enrich2 %>% filter(Dataset=='KEGG',L2=='09180 Brite Hierarchies') %>% 
+                arrange(L4) %>% arrange(L3) %>% pull(bold),
+          enrich2 %>% filter(Dataset=='KEGG',L2=='09120 Genetic Information Processing') %>% 
+                arrange(L4) %>% arrange(L3) %>% pull(bold))
+enrich2$bold = factor(enrich2$bold, levels = order)
+
+enrich2$cat = factor(enrich2$cat, levels = c('Category','Oxidoreductases','Transferases','Hydrolases','Ligases',sort(enrich2$cat[enrich2$Dataset=='KEGG'] %>% unique)))
+
+enrich3 = enrich2 %>% 
+  arrange(bold) %>%
+  mutate(bold2 = as.character(bold)) %>% 
+  mutate(bold2 = ifelse(!is.na(prefix) & str_sub(bold2,end=3) !='<b>',
+                        paste0(prefix,bold2),bold2)) %>% 
+  mutate(bold2 = ifelse(Test %in% c('1.1.1 NAD(+)/NADP(+) Acceptor'),paste0(prefix,bold2),bold2)) %>% 
+  mutate(bolditalics = ifelse(prefix=='→ → ',paste0('<i>',bold2,'</i>'),bold2)) %>% 
+  arrange(bold)
+
+enrich3$bolditalics = factor(enrich3$bolditalics, levels = enrich3$bolditalics)
+```
+
+```{r}
+library(ggh4x)
+p = enrich3 %>%
+  ggplot(aes(Enrichment,bolditalics,fill=Dir)) +
+  geom_col() +
+  theme_classic(base_size=16) +
+  facet_nested(Dataset + cat ~ .,scales = 'free',space = 'free',
+               strip = ggh4x::strip_nested(size = "variable")) +
+  ylab(NULL) + xlab('Log 2 Fold Enrichment (Pathway/Background)') +
+  theme(strip.text.y.right = element_text(angle = 0)) +
+  theme(axis.text.y=element_markdown()) +
+  theme(legend.position = 'none') +
+  # xlim(-3.5,3.5) +
+  theme(panel.spacing=unit(1,"lines"))
+
+ggsave('../Results/2. Differential Abundance & Enrichments/Fig. 2c - Enriched and Depleted Functions.jpeg',plot = p,height=12, width = 10)
+
+plotdata = p$data
+
+writexl::write_xlsx(list(plotdata),"C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/THESIS/Tables/CHAP 3/Table A.3.5 - Enrichment Data.xlsx")
+```

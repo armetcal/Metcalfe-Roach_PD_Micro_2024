@@ -169,21 +169,7 @@ close.noinf = close %>% mutate(Closeness = ifelse(is.nan(Closeness),infval,Close
 close.noinf = close.noinf %>% mutate(Closeness = log10(Closeness))
 ```
 
-# Fig. 1a - Overall Network Graphs
-
-```{r}
-cbPalette <- c("#D55E00", "#E69F00", "#009E73", "#33CCFF", "#BBBBBB", '#000000')
-
-# Plot results, colour by Phylum
-p1 = plot_network(ig.pd, ps, type='taxa', color="Phylum",label = NA, title = 'PD',point_size = vsize.pd-2.5) +
-  scale_colour_manual(values=cbPalette)
-p2 = plot_network(ig.ctrl, ps, type='taxa', color="Phylum",label = NA, title = 'Ctrl',point_size = vsize.ctrl-2.5) +
-  scale_colour_manual(values=cbPalette)
-ggpubr::ggarrange(plotlist=list(p1,p2),common.legend = T, legend = 'right')
-ggsave('../Results/1. Microbial Network Analysis/Fig. 1a - Networks.png', height = 5, width = 10)
-```
-
-# Fig. 1b - Proportion of existing connections vs total possible connections
+# Fig. 1a - Proportion of existing connections vs total possible connections
 
 ```{r}
 # dist contains one row for each possible taxon-taxon connection.
@@ -195,20 +181,20 @@ dist_0 = dist %>% group_by(Status,Connected) %>% tally() %>%
 sum(dist_0$Ctrl) # of possible connections
 dist.chi = chisq.test(dist_0); dist.chi
 
-dist %>% group_by(Status,Connected) %>% tally() %>% 
+dist_plot = dist %>% group_by(Status,Connected) %>% tally() %>% 
   ggplot(aes(Status,n,fill = Connected)) +
   geom_col(position = 'stack') +
-  theme_classic(base_size = 20) +
+  theme_classic(base_size = 22) +
   xlab(NULL) +ylab('# Taxon-Taxon Connections') +
   # Add p value
   geom_segment(x = 0.8,xend = 2.2,y=9000,yend=9000, size = 1) +
   # p value is from 'chi' object
   geom_text(x = 1.5,y = 9500, label='p < 2.22e-16',size =8) +
-  ylim(0,9500)
-ggsave('../Results/1. Microbial Network Analysis/Fig. 1b - Proportion of Possible Connections.png', height = 5, width = 5.5)
+  ylim(0,9500) +
+  scale_fill_grey(start = 0.3, end=0.7)
 ```
 
-# Fig. 1c - Betweenness Centrality
+# Fig. 1b - Betweenness Centrality
 
 ```{r}
 # For every taxon-taxon connection, their distance is considered to be the length of the shortest path which connects them via any series of edges (distances) and nodes (microbes).
@@ -223,20 +209,20 @@ bw.wilcox = wilcox.test(Betweenness~Status,
 names(bw.wilcox)[2] = 'Value'
 
 # Strong overall differences
-bw %>% ggplot(aes(Status,Betweenness,fill = Status)) +
+bw_plot = bw %>% ggplot(aes(Status,Betweenness,fill = Status)) +
   geom_violin(adjust = 2, draw_quantiles = 0.5,size = 1) +
   geom_jitter(height = 0.5, width = 0.2) +
-  theme_classic(base_size = 20) +
+  theme_classic(base_size = 22) +
   xlab(NULL) + ylab('Betweenness Centrality') +
   geom_line(aes(group = Species)) +
   theme(legend.position = 'none') +
   stat_compare_means(method='wilcox',comparisons = list(c('PD','Ctrl')),
                      label = 'p.format', paired = T,size = 8) +
-  ylim(-10,2100)
-ggsave('../Results/1. Microbial Network Analysis/Fig. 1c - Betweenness Centrality.png', height = 5, width = 4.5)
+  ylim(-10,2100) +
+  scale_fill_grey(start = 0.3, end=0.7)
 ```
 
-# Fig. 1d - Closeness Centrality
+# Fig. 1c - Closeness Centrality
 
 ```{r}
 close.wilcox = wilcox.test(Closeness~Status, 
@@ -245,21 +231,21 @@ close.wilcox = wilcox.test(Closeness~Status,
                            paired=T,conf.int = T) %>% unlist %>% as.data.frame %>% rownames_to_column('Parameter') %>% mutate(Test = 'Closeness')
 names(close.wilcox)[2] = 'Value'
 
-close.noinf %>% 
+close_plot = close.noinf %>% 
   ggplot(aes(Status,Closeness,fill = Status)) +
   geom_violin(adjust = 2, draw_quantiles = 0.5,size = 1) +
   geom_jitter(height = 0, width = 0.2) +
-  theme_classic(base_size = 20) +
+  theme_classic(base_size = 22) +
   xlab(NULL) + ylab('Closeness Centrality') +
   geom_line(aes(group = Species)) +
   ylim(-1.25,0.1) +
   theme(legend.position = 'none') +
   stat_compare_means(method='wilcox',comparisons = list(c('PD','Ctrl')),
-                     label = 'p.format', paired = T,size = 8)
-ggsave('../Results/1. Microbial Network Analysis/Fig. 1d - Closeness Centrality.png', height = 5, width = 4.5)
+                     label = 'p.format', paired = T,size = 8) +
+  scale_fill_grey(start = 0.3, end=0.7)
 ```
 
-# Fig. 1e - All Non-Infinite Node-Node Distances
+# Fig. 1d - All Non-Infinite Node-Node Distances
 
 ```{r}
 # This measure is similar to closeness centrality, where it is a representation of the distances between each node. However, it differs in the following way:
@@ -272,22 +258,48 @@ dist.wilcox = wilcox.test(Distance~Status,
 names(dist.wilcox)[2] = 'Value'
 
 # dist_all.noinf: contains all pathway distances, with all self associations, duplicates removed. Infinite values were assigned a value of 1.5* the maximum non-infinite value for our other distance plot, so we will filter these out (infinite = not connected via the network)
-dist_all.noinf %>% 
+dist_all_plot = dist_all.noinf %>% 
   filter(Distance<18) %>% # remove infinites
   ggplot(aes(Status,Distance,fill = Status)) +
   geom_violin(adjust = 3, draw_quantiles = 0.5,size = 1) +
-  theme_classic(base_size = 20) +
+  theme_classic(base_size = 22) +
   xlab(NULL) + ylab('Taxon-Taxon Distance (Non-Inf)') +
   theme(legend.position = 'none') +
   stat_compare_means(method = 'wilcox',comparisons = list(c('PD','Ctrl')),
                      label = 'p.format', paired = F,size = 8) +
-  ylim(0,14)
-ggsave('../Results/1. Microbial Network Analysis/Fig. 1e - Taxon-Taxon Distances.png', height = 5, width = 4.5)
+  ylim(0,14) +
+  scale_fill_grey(start = 0.3, end=0.7)
 ```
 
-# Fig. S2 - Phylum-Specific Betweenness Centrality
+# Fig. 1 - Combine and Save
 
 ```{r}
+p_out = ggarrange(plotlist = list(dist_plot, bw_plot, close_plot, dist_all_plot))
+p_out
+ggsave('../Results/Figures/Figure 1 - Microbial Network Analysis.tiff', height = 8.5, width = 12)
+```
+
+
+# Fig. S1 - Network Plot & Phylum-Specific Betweenness Centrality
+
+```{r Network Plots}
+# Colour blind friendly palette
+cbPalette <- c("#D55E00", "#E69F00", "#009E73", "#33CCFF", "#BBBBBB", '#000000')
+
+# Plot results, colour by Phylum
+p1 = plot_network(ig.pd, ps, type='taxa', color="Phylum",label = NA, title = 'PD',point_size = vsize.pd-2.5) +
+  scale_colour_manual(values=cbPalette) +
+  theme_void(base_size=22) +
+  ggeasy::easy_center_title()
+p2 = plot_network(ig.ctrl, ps, type='taxa', color="Phylum",label = NA, title = 'Ctrl',point_size = vsize.ctrl-2.5) +
+  scale_colour_manual(values=cbPalette) +
+  theme_void(base_size=22) +
+  ggeasy::easy_center_title()
+net_plot = ggpubr::ggarrange(plotlist=list(p1,p2),common.legend = T, legend = 'right')
+net_plot
+```
+
+```{r Betweenness Phyla}
 bw.wilcox.phylum = bw %>% group_by(Phylum) %>% add_tally() %>% 
   filter(n>2) %>% 
   mutate(Status = factor(Status, levels = c("PD","Ctrl"))) %>% 
@@ -298,7 +310,7 @@ bw.wilcox.phylum = bw %>% group_by(Phylum) %>% add_tally() %>%
   mutate(qval = p.adjust(p.value,method='BH'),.after='p.value')
 table(bw$Status,bw$Phylum)
 # Phylum-specific differences
-bw %>% group_by(Phylum) %>% add_tally %>%
+s1_plot = bw %>% group_by(Phylum) %>% add_tally %>%
   # Phyla with four or fewer taxa will be removed, as there just isn't enough statistical power to be meaningful. This ends up removing just two phyla, both with n=2 species. The next highest has n=14.
   mutate(Phylum = ifelse(n>4,Phylum,'Other')) %>% ungroup() %>% 
   filter(Phylum != 'Other') %>% # Remove other taxa
@@ -306,14 +318,18 @@ bw %>% group_by(Phylum) %>% add_tally %>%
   geom_violin(adjust = 2, draw_quantiles = 0.5,size = 1) +
   geom_jitter(height=0.1,width =0.1) +
   geom_line(aes(group=Species)) +
-  theme_classic(base_size = 20) +
+  theme_classic(base_size = 22) +
   xlab(NULL) + ylab('Betweenness Centrality') +
   theme(legend.position = 'none') +
   ylim(-10,2200) +
-  geom_text(aes(x=1.2,y=2000, label=paste0('q = ',round(qval,2))),
-            data = bw.wilcox.phylum, inherit.aes=F,size = 5,lineheight=0.8,hjust=0) +
+  geom_text(aes(x=1.2,y=2000, label=paste0('Padj = ',round(qval,2))),
+            data = bw.wilcox.phylum, inherit.aes=F,size = 6,lineheight=0.8,hjust=0.1) +
   facet_wrap('Phylum')
-ggsave('../Results/Supplementary Figures/Fig. S2 - Betweenness Centrality - Phylum.png', height = 5, width = 5.3)
+```
+
+```{r Combine}
+ggarrange(plotlist = list(net_plot, s1_plot), ncol = 2, widths = c(3,2))
+ggsave('../Results/Supp Figures/Figure S1 - Network and Betweenness Centrality Phylum.tiff', height = 5, width = 17)
 ```
 
 # (No Figure) Number of taxa with zero connections
@@ -368,11 +384,11 @@ taxa = taxa_names(ps) %>% as.data.frame() %>%
            into = c('Kingdom','Phylum','Class','Order','Family','Genus','Species'))
 
 L = list('Species Included' = taxa,
-         'Fig. 1b' = dist.chi %>% broom::tidy(),
-         'Fig. 1c' = bw.wilcox,
-         'Fig. 1d' = close.wilcox,
-         'Fig. 1e' = dist.wilcox,
-         'Fig. S2' = bw.wilcox.phylum,
+         'Fig. 1a' = dist.chi %>% broom::tidy(),
+         'Fig. 1b' = bw.wilcox,
+         'Fig. 1c' = close.wilcox,
+         'Fig. 1d' = dist.wilcox,
+         'Fig. S1' = bw.wilcox.phylum,
          'No Figure (Prop. 0-edge nodes)' = degree.chi %>% broom::tidy()) %>% 
   lapply(as.data.frame)
 

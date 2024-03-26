@@ -1,0 +1,45 @@
+---
+title: "Figure S6"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(ggpubr)
+library(data.table)
+library(tidyverse)
+
+# This contains all the taxonomic and sample data necessary for cross-sectional analyses.
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds")
+```
+
+```{r}
+bl = ps %>% microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% c('s__Blautia_wexlerae','s__Blautia_obeum')) %>% 
+  psmelt() %>% 
+  select(Sample, Abundance, Species) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) 
+
+only_nonzero = bl %>% filter(s__Blautia_wexlerae>0 & s__Blautia_obeum>0)
+
+p1 = summary(glm(s__Blautia_obeum~s__Blautia_wexlerae,data = bl))$coefficients
+p2 = summary(glm(s__Blautia_obeum~s__Blautia_wexlerae,data = only_nonzero))$coefficients
+
+bl %>% 
+  ggplot(aes(s__Blautia_obeum, s__Blautia_wexlerae)) +
+  geom_point() +
+  geom_smooth(method='lm', col = 'black') +
+  geom_smooth(method='lm', inherit.aes=F, 
+              data = only_nonzero, 
+              aes(s__Blautia_obeum, s__Blautia_wexlerae),
+              col = 'red') +
+  geom_text(x = 2, y=0.5, size=6,
+            label = paste0('β=',round(p1[2,1],2),', P=',format(p1[2,4],digits = 2,scientific = T))) +
+  geom_text(x = 2, y=1.5, size=6,col = 'red',
+            label = paste0('β=',round(p2[2,1],2),', P=',format(p2[2,4],digits = 2,scientific = T))) +
+  theme_classic(base_size = 20)
+
+ggsave("../Results/Supp Figures/Figure S6 - Blautia.tiff", height = 4, width = 4)
+```

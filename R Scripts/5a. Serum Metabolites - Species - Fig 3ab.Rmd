@@ -32,9 +32,9 @@ temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/
 # Include F. prausnitzii because of its strong association with 
 #  Ctrl-associated pathways (Table 2)
 psig = readxl::read_xlsx('../Results/Table 1 - Stratified Hits.xlsx') %>%
-  filter(`Total (%)`>=10) %>% # at least 10% of the functional hits reproduced
-  mutate(Species = sapply(Species,function(x) paste0('s__',x) %>% str_replace_all(' ','_'))) %>% 
-  pull(Species)
+  filter(`Total (%)`>=33) %>% # at least 10% of the functional hits reproduced
+  mutate(Taxon = sapply(Taxon,function(x) paste0('s__',x) %>% str_replace_all(' ','_'))) %>% 
+  pull(Taxon)
 sig = c(temp2[['Species']],psig) %>% unique
 
 # Select species and melt phyloseq object

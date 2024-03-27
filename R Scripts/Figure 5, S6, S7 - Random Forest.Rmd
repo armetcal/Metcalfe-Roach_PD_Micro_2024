@@ -1,0 +1,602 @@
+---
+title: "Figure 5 - Random Forest"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(ggpubr)
+library(data.table)
+library(tidyverse)
+library(readxl)
+library(scales)
+```
+
+# Importance Values - Status
+
+```{r Formatting function and dataframes}
+format_features = function(v){
+  temp = sapply(v,function(x){
+    if(str_detect(x,'s__')){
+      a = x %>% str_remove('s__') %>% str_split('_') %>% .[[1]]
+      a[1] = paste(str_sub(a[1],end=1),'.')
+      return(paste(a[1],a[2]))
+    } else {
+      return(str_wrap(x,20))
+    }
+  })
+  return(temp)
+}
+fix = tibble(Feature = c('Sex','smokeprev_or_before_pd','bristol','coffee_per_day'),
+             fix = c('Sex (Male)', "Ever Smoked",'Bristol Rating','Coffee/Day'))
+meta_names = tibble(Feature = c("PWY-7383: anaerobic energy metabolism (invertebrates, cytosol)",
+                                "PWY-6471: peptidoglycan biosynthesis IV (Enterococcus faecium)",
+                                "PWY66-409: superpathway of purine nucleotide salvage",
+                                "PWY-5177: glutaryl-CoA degradation",     
+                                "PWY-7242: D-fructuronate degradation",     
+                                "GLUCUROCAT-PWY: superpathway of &beta;-D-glucuronide and D-glucuronate degradation",
+                                "GALACT-GLUCUROCAT-PWY: superpathway of hexuronide and hexuronate degradation"),
+                    new = c("PWY-7383:\nanaerobic metabolism",
+                                "PWY-6471:\npeptidoglycan biosynth.",
+                                "PWY66-409:\npurine salvage",
+                                "PWY-5177:\nglutaryl-CoA degrad.",     
+                                "PWY-7242:\nfructuronate degrad.",     
+                                "GLUCUROCAT-PWY:\nglucuronide/ate degrad.",
+                                "GALACT-GLUCUROCAT-PWY:\nhexuronide/ate degrad."))
+key = read.csv('../Reference Files/EC_key.csv') %>% rename(Feature=EC) %>% select(-EC2) %>% 
+  mutate(ec = sapply(ec, function(x) x %>% str_split(' // ') %>% .[[1]] %>% .[1]))
+```
+
+```{r Formatted Importance Values}
+# Load Importance Values
+imp = read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - Covars.xlsx') %>% mutate(Data='Covar') %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - Taxonomy.xlsx', 
+                      sheet='Taxonomy') %>% mutate(Data='Taxonomy')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - Taxonomy.xlsx', 
+                      sheet='Taxonomy & Covar') %>% mutate(Data='Taxonomy & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - MetaCyc.xlsx', 
+                      sheet='MetaCyc') %>% mutate(Data='MetaCyc')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - MetaCyc.xlsx', 
+                      sheet='MetaCyc & Covar') %>% mutate(Data='MetaCyc & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - KO.xlsx', 
+                      sheet='KO') %>% mutate(Data='KO')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - KO.xlsx', 
+                      sheet='KO & Covar') %>% mutate(Data='KO & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - COG.xlsx', 
+                      sheet='COG') %>% mutate(Data='COG')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - COG.xlsx', 
+                      sheet='COG & Covar') %>% mutate(Data='COG & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - EC.xlsx', 
+                      sheet='EC') %>% mutate(Data='EC')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - EC.xlsx', 
+                      sheet='EC & Covar') %>% mutate(Data='EC & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - Metabolites Annot&Covar.xlsx', 
+                      sheet='Metabolites') %>% mutate(Data='Metabolites')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Status - Metabolites Annot&Covar.xlsx', 
+                      sheet='Metabolites & Covar') %>% mutate(Data='Metabolites & Covar')) %>% 
+  mutate(Feature = ifelse(Feature=='logcoffeeperday','coffee_per_day',Feature))
+
+# Add direction info and format the Feature names for plotting
+imp2 = imp %>%
+  left_join(fix) %>% mutate(Feature = ifelse(!is.na(fix),fix,Feature)) %>% 
+  left_join(meta_names) %>% mutate(Feature = ifelse(!is.na(new),new,Feature)) %>% 
+  mutate(Feature = format_features(.$Feature)) 
+imp2$Feature[str_detect(imp2$Data,'EC|COG|KO')] = sapply(imp2$Feature[str_detect(imp2$Data,'EC|COG|KO')],
+                                                            function(x) x %>% str_split(':') %>% .[[1]] %>% .[1])
+imp2 = imp2 %>% mutate(Feature = ifelse(str_detect(Data,'EC|COG|KO'), str_remove_all(Feature,' |\n'),Feature))
+imp2 = imp2 %>% 
+  left_join(key) %>% 
+  mutate(Feature = ifelse(!is.na(ec),ec,Feature)) %>% 
+  select(-ec,-new,-fix)
+
+# Order by magnitude
+imp3 = imp2 %>% 
+  arrange(Importance) %>% 
+  mutate(Data = factor(Data, levels = c('Covar',sort(unique(.$Data))[sort(unique(.$Data))!='Covar']))) %>% 
+  arrange(Data) %>% 
+  select(-`...1`)
+
+# For reference below:
+imp4 = imp2 %>% rename(fixed = Feature) %>% left_join(imp)
+```
+
+```{r Save Importance Table}
+# L = list(Taxonomy = imp3 %>% filter(str_detect(Data,'Taxonomy') | Data=='Covar'),
+#          MetaCyc = imp3 %>% filter(str_detect(Data,'MetaCyc') | Data=='Covar'),
+#          KO = imp3 %>% filter(str_detect(Data,'KO') | Data=='Covar'),
+#          COG = imp3 %>% filter(str_detect(Data,'COG') | Data=='Covar'),
+#          EC = imp3 %>% filter(str_detect(Data,'EC') | Data=='Covar'),
+#          Metabolites = imp3 %>% filter(str_detect(Data,'Metabolites') | Data=='Covar'))
+# 
+# writexl::write_xlsx(L,'../Results/Supplementary Data/Random Forest/00. RF Importance Values - Status - Formatted.xlsx')
+```
+
+```{r Plot Importance Values}
+# Taxonomy
+p1 = imp3 %>% filter(Data=='Covar') %>% mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    theme_classic(base_size=18) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p2 = imp3 %>% filter(Data=='Taxonomy') %>% mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    theme_classic(base_size=18) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('Taxonomy') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p3 = imp3 %>% filter(Data=='Taxonomy & Covar') %>% mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    theme_classic(base_size=18) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('Taxonomy & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+plot.taxa = ggarrange(p1,p2,p3, ncol=3, widths = c(4,6,8))
+
+# MetaCyc
+p4 = imp3 %>% filter(Data=='MetaCyc') %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('MetaCyc') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='MetaCyc & Covar') %>%
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('MetaCyc & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+plot.meta = ggarrange(p4,p5, ncol=2, widths = c(6,8))
+
+# KO
+p4 = imp3 %>% filter(Data=='KO') %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('KO') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='KO & Covar') %>%
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('KO & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+plot.ko = ggarrange(p4,p5, nrow=2)
+
+# EC
+p4 = imp3 %>% filter(Data=='EC') %>%
+  .[-which(duplicated(.$Feature)),] %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('EC') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='EC & Covar') %>%
+  .[-which(duplicated(.$Feature)),] %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('EC & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+plot.ec = ggarrange(p4,p5, nrow=2)
+
+# COG
+p4 = imp3 %>% filter(Data=='COG') %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('COG') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='COG & Covar') %>%
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('COG & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+plot.cog = ggarrange(p4,p5, nrow=2)
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Importance Values - Progression
+
+```{r Formatting function and dataframes}
+format_features = function(v){
+  temp = sapply(v,function(x){
+    if(str_detect(x,'s__')){
+      a = x %>% str_remove('s__') %>% str_split('_') %>% .[[1]]
+      a[1] = paste(str_sub(a[1],end=1),'.')
+      return(paste(a[1],a[2]))
+    } else {
+      return(str_wrap(x,20))
+    }
+  })
+  return(temp)
+}
+fix = tibble(Feature = c('Sex','smokeprev_or_before_pd','bristol','coffee_per_day'),
+             fix = c('Sex (Male)', "Ever Smoked",'Bristol Rating','Coffee/Day'))
+meta_names = tibble(Feature = c("PWY-7383: anaerobic energy metabolism (invertebrates, cytosol)",
+                                "PWY-6471: peptidoglycan biosynthesis IV (Enterococcus faecium)",
+                                "PWY66-409: superpathway of purine nucleotide salvage",
+                                "PWY-5177: glutaryl-CoA degradation",     
+                                "PWY-7242: D-fructuronate degradation",     
+                                "GLUCUROCAT-PWY: superpathway of &beta;-D-glucuronide and D-glucuronate degradation",
+                                "GALACT-GLUCUROCAT-PWY: superpathway of hexuronide and hexuronate degradation"),
+                    new = c("PWY-7383:\nanaerobic metabolism",
+                                "PWY-6471:\npeptidoglycan biosynth.",
+                                "PWY66-409:\npurine salvage",
+                                "PWY-5177:\nglutaryl-CoA degrad.",     
+                                "PWY-7242:\nfructuronate degrad.",     
+                                "GLUCUROCAT-PWY:\nglucuronide/ate degrad.",
+                                "GALACT-GLUCUROCAT-PWY:\nhexuronide/ate degrad."))
+key = read.csv('../Reference Files/EC_key.csv') %>% rename(Feature=EC) %>% select(-EC2) %>% 
+  mutate(ec = sapply(ec, function(x) x %>% str_split(' // ') %>% .[[1]] %>% .[1]))
+```
+
+```{r Formatted Importance Values}
+# Load Importance Values
+imp = read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - Covars.xlsx') %>% mutate(Data='Covar') %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - Taxonomy.xlsx', 
+                      sheet='Taxonomy') %>% mutate(Data='Taxonomy')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - Taxonomy.xlsx', 
+                      sheet='Taxonomy & Covar') %>% mutate(Data='Taxonomy & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - MetaCyc.xlsx', 
+                      sheet='MetaCyc') %>% mutate(Data='MetaCyc')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - MetaCyc.xlsx', 
+                      sheet='MetaCyc & Covar') %>% mutate(Data='MetaCyc & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - KO.xlsx', 
+                      sheet='KO') %>% mutate(Data='KO')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - KO.xlsx', 
+                      sheet='KO & Covar') %>% mutate(Data='KO & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - COG.xlsx', 
+                      sheet='COG') %>% mutate(Data='COG')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - COG.xlsx', 
+                      sheet='COG & Covar') %>% mutate(Data='COG & Covar')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - EC.xlsx', 
+                      sheet='EC') %>% mutate(Data='EC')) %>% 
+  full_join(read_xlsx('../Results/Supplementary Data/Random Forest/RF Importance Values - Progression - EC.xlsx', 
+                      sheet='EC & Covar') %>% mutate(Data='EC & Covar')) %>% 
+  mutate(Feature = ifelse(Feature=='logcoffeeperday','coffee_per_day',Feature))
+
+# Add direction info and format the Feature names for plotting
+imp2 = imp %>%
+  left_join(fix) %>% mutate(Feature = ifelse(!is.na(fix),fix,Feature)) %>% 
+  left_join(meta_names) %>% mutate(Feature = ifelse(!is.na(new),new,Feature)) %>% 
+  mutate(Feature = format_features(.$Feature)) 
+imp2$Feature[str_detect(imp2$Data,'EC|COG|KO')] = sapply(imp2$Feature[str_detect(imp2$Data,'EC|COG|KO')],
+                                                            function(x) x %>% str_split(':') %>% .[[1]] %>% .[1])
+imp2 = imp2 %>% mutate(Feature = ifelse(str_detect(Data,'EC|COG|KO'), str_remove_all(Feature,' |\n'),Feature))
+imp2 = imp2 %>% mutate(Feature = ifelse(str_detect(Feature,'ARGININE-DEIMINASE'),'ARGININE-DEIMINASE-RXN',Feature)) %>% 
+  left_join(key) %>% 
+  mutate(Feature = ifelse(!is.na(ec),ec,Feature)) %>% 
+  select(-ec,-new,-fix)
+
+imp3 = imp2 %>%
+  arrange(Importance) %>% 
+  mutate(Data = factor(Data, levels = c('Covar',sort(unique(.$Data))[sort(unique(.$Data))!='Covar']))) %>% 
+  arrange(Data) %>% 
+  select(-`...1`)
+
+# For reference below:
+imp4 = imp2 %>% rename(fixed = Feature) %>% left_join(imp)
+```
+
+```{r Save Importance Table}
+# L = list(Taxonomy = imp3 %>% filter(str_detect(Data,'Taxonomy') | Data=='Covar'),
+#          MetaCyc = imp3 %>% filter(str_detect(Data,'MetaCyc') | Data=='Covar'),
+#          KO = imp3 %>% filter(str_detect(Data,'KO') | Data=='Covar'),
+#          COG = imp3 %>% filter(str_detect(Data,'COG') | Data=='Covar'),
+#          EC = imp3 %>% filter(str_detect(Data,'EC') | Data=='Covar'))
+# 
+# writexl::write_xlsx(L,'../Results/Supplementary Data/Random Forest/00. RF Importance Values - Progression - Formatted.xlsx')
+```
+
+```{r Plot Importance Values}
+# Taxonomy
+p1 = imp3 %>% filter(Data=='Covar') %>% mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=18) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p2 = imp3 %>% filter(Data=='Taxonomy') %>% mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=18) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('Taxonomy') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p3 = imp3 %>% filter(Data=='Taxonomy & Covar') %>% mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=18) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('Taxonomy & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+prog.taxa = ggarrange(p1,p2,p3, ncol=3, widths = c(4,6,8))
+
+# MetaCyc
+p4 = imp3 %>% filter(Data=='MetaCyc') %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+   ylab('Importance') + ggtitle('MetaCyc') + ggeasy::easy_center_title() +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='MetaCyc & Covar') %>%
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('MetaCyc & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+prog.meta = ggarrange(p4,p5, ncol=2, widths = c(6,8))
+
+# KO
+p4 = imp3 %>% filter(Data=='KO') %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('KO') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='KO & Covar') %>%
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('KO & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+prog.ko = ggarrange(p4,p5, nrow=2)
+
+# EC
+p4 = imp3 %>% filter(Data=='EC') %>%
+  .[-which(duplicated(.$Feature)),] %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('EC') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='EC & Covar') %>%
+  .[-which(duplicated(.$Feature)),] %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('EC & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+prog.ec = ggarrange(p4,p5, nrow=2)
+
+# COG
+p4 = imp3 %>% filter(Data=='COG') %>% 
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('COG') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+p5 = imp3 %>% filter(Data=='COG & Covar') %>%
+  mutate(Feature=factor(Feature,levels=.$Feature)) %>% 
+    ggplot(aes(y = Importance, x = Feature, fill=-Importance)) + geom_col() +
+    
+    theme_classic(base_size=16) +
+    theme(legend.position = 'none')  +  
+  scale_y_continuous(expand = expansion(mult = c(0,0.15))) +xlab(NULL) + ylab('Importance') + ggtitle('COG & Covar') + ggeasy::easy_center_title() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    scale_fill_gradientn(colors = gray.colors(100,start = 0.2, end = .6, rev = F))
+
+prog.cog = ggarrange(p4,p5, nrow=2)
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Format for figures
+
+```{r Figure 5cd}
+p5 = ggarrange(plotlist = list(plot.taxa, plot.meta, prog.taxa, prog.meta),
+               nrow = 4, heights = c(1,1.2,1,1.2))
+ggsave('../Results/Figures/Figure 5c,d - RF Importance Scores.pdf', height = 14, width = 12)
+```
+
+```{r Figure S6}
+pS6a = ggarrange(plotlist = list(plot.cog, plot.ko, plot.ec),
+               nrow = 3, heights = c(1,1,1))
+pS6b = ggarrange(plotlist = list(prog.cog, prog.ko, prog.ec),
+               nrow = 3, heights = c(1,1,1))
+pS6 = ggarrange(plotlist = list(pS6a, pS6b), ncol = 2)
+ggsave('../Results/Supp Figures/Figure S6 - RF Importance Scores.pdf', height = 18, width = 24)
+```
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Figure 5efg
+
+```{r}
+# Calculate most important features
+imp5 = imp4 %>% group_by(Data) %>% 
+  summarise(IQR = IQR(Importance),
+            q25 = quantile(Importance,0.25),
+            q75 = quantile(Importance,0.75)) %>% 
+  ungroup() %>% 
+  right_join(imp4) %>% 
+  mutate(outlier = Importance > q75+(1.5*IQR)) %>% 
+  group_by(Data) %>% arrange(-Importance) %>% 
+  mutate(biggest = Importance==Importance[1L]) %>% ungroup() %>% 
+  mutate(plot = biggest | outlier)
+
+# Main figure
+imp5f = imp5 %>% filter(Data == 'Covar' | str_detect(Data,'Taxonomy') | str_detect(Data,"MetaCyc")) %>% 
+  filter(plot==T)
+# Other datasets
+imp5f2 = imp5 %>% filter(!(Data %in% imp5f$Data)) %>% filter(plot==T) 
+# if EC, need to change the names so it matches up with other dataset
+imp5f2$Feature[str_detect(imp5f2$Data,'EC')] = sapply(imp5f2$Feature[str_detect(imp5f2$Data,'EC')],
+                                                      function(x) str_replace_all(x,'[^a-zA-Z\\d\\s:]','.') %>% str_replace_all(': ','..'))
+
+# MAIN FIGURE PLOTS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Load data from RF
+rf.tax = read.csv('../Reference Files/FOR RF - Progression - Taxonomy.csv')
+rf.meta = read.csv('../Reference Files/FOR RF - Progression - MetaCyc.csv')
+
+# Plot
+temp = rf.tax %>% select(Sample,Estimate, Progression, any_of(imp5f$Feature)) %>% 
+  left_join(rf.meta %>% select(Sample, 'PWY66.409..superpathway.of.purine.nucleotide.salvage')) %>% 
+  mutate(Progression = factor(.$Progression, levels = c('Slow','Med','Fast')))
+
+p1 = temp %>% 
+  ggplot(aes(Progression, s__Faecalibacterium_prausnitzii,fill = Progression)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0,width=0.2) +
+  theme_classic(base_size=18) +
+  ggpubr::stat_compare_means(comparisons = list(c('Slow','Med'),c('Med','Fast'),c('Slow','Fast')), size=6) +
+  ylab('F. prausnitzii') +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = expansion(mult = 0.1)) +
+  scale_fill_grey(start = 0.5, end = 1)
+
+p2 = temp %>% 
+  ggplot(aes(Progression,PWY66.409..superpathway.of.purine.nucleotide.salvage,fill = Progression)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0,width=0.2) +
+  theme_classic(base_size=18) +
+  ggpubr::stat_compare_means(comparisons = list(c('Slow','Med'),c('Med','Fast'),c('Slow','Fast')), size=6) +
+  ylab('Purine Nucleotide Salvage') +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = expansion(mult = 0.1)) +
+  scale_fill_grey(start = 0.5, end = 1)
+
+p3 = temp %>% 
+  ggplot(aes(Progression,coffee_per_day,fill = Progression)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0.2,width=0.2) +
+  theme_classic(base_size=18) +
+  ggpubr::stat_compare_means(comparisons = list(c('Slow','Med'),c('Med','Fast'),c('Slow','Fast')), size=6) +
+  ylab('Cups Coffee/Day') +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = expansion(mult = 0.1)) +
+  scale_fill_grey(start = 0.5, end = 1)
+
+p5efg = ggarrange(plotlist = list(p3,NULL,p1,NULL,p2),ncol = 1, heights = c(8,2,8,2,8))
+
+ggsave(plot=p5efg,"../Results/Figures/Figure 5efg - RF Boxplots.pdf", height=15,width=5)
+
+# SUPP FIGURE PLOTS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Load data from RF and fix names
+rf.cog = read.csv('../Reference Files/FOR RF - Progression - COG.csv')
+names(rf.cog)[8:ncol(rf.cog)] = names(rf.cog)[8:ncol(rf.cog)] %>% sapply(function(x)x %>% str_split('[.][.]') %>% .[[1]] %>% .[1])
+rf.ec = read.csv('../Reference Files/FOR RF - Progression - EC.csv')
+names(rf.ec)[8:ncol(rf.ec)] = names(rf.ec)[8:ncol(rf.ec)] %>% sapply(function(x)x %>% str_replace_all('[^a-zA-Z\\d\\s:]','.'))
+names(rf.ec) = sapply(names(rf.ec), function(x){ ifelse(str_sub(x,end=1)=='X',str_sub(x,start=2),x)})
+rf.ko = read.csv('../Reference Files/FOR RF - Progression - KO.csv')
+names(rf.ko)[8:ncol(rf.ko)] = names(rf.ko)[8:ncol(rf.ko)] %>% sapply(function(x)x %>% str_split('[.][.]') %>% .[[1]] %>% .[1])
+
+# Plot
+temp = rf.cog %>% select(Sample,Estimate, Progression, any_of(imp5f2$fixed)) %>% 
+  left_join(rf.ec %>% select(Sample, any_of(imp5f2$Feature))) %>% 
+  left_join(rf.ko %>% select(Sample, any_of(imp5f2$fixed))) %>% 
+  mutate(Progression = factor(.$Progression, levels = c('Slow','Med','Fast'))) %>% 
+  pivot_longer(cols = names(.)[4:ncol(.)], names_to = 'Feature',values_to = 'value')
+temp$Feature = sapply(temp$Feature, function(x) ifelse(x %in% imp5f2$Feature,imp5f2$fixed[which(x == imp5f2$Feature)],x)) 
+temp = temp %>% 
+  left_join(imp5f2 %>% select(Data,fixed) %>% rename(Feature=fixed) %>% 
+              mutate(Data = str_remove(Data,' & Covar')) %>% unique)
+```
+
+```{r}
+p1 = temp %>% filter(Data=='COG') %>% 
+  ggplot(aes(Progression, value,fill = Progression)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0,width=0.2) +
+  theme_classic(base_size=18) +
+  ggpubr::stat_compare_means(comparisons = list(c('Slow','Med'),c('Med','Fast'),c('Slow','Fast')), size=6) +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = expansion(mult = 0.1)) +
+  facet_wrap('Feature',nrow=1) + xlab(NULL) + ylab('') +
+  scale_fill_grey(start = 0.5, end = 1)
+
+
+p2 = temp %>% filter(Data=='EC') %>% 
+  ggplot(aes(Progression, value,fill = Progression)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0,width=0.2) +
+  theme_classic(base_size=18) +
+  ggpubr::stat_compare_means(comparisons = list(c('Slow','Med'),c('Med','Fast'),c('Slow','Fast')), size=6) +
+  ylab('Feature Abundance') +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = expansion(mult = 0.1)) +
+  facet_wrap('Feature',nrow=1) + xlab(NULL) +
+  scale_fill_grey(start = 0.5, end = 1)
+
+
+p3 = temp %>% filter(Data=='KO') %>% 
+  ggplot(aes(Progression, value,fill = Progression)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(height=0,width=0.2) +
+  theme_classic(base_size=18) +
+  ggpubr::stat_compare_means(comparisons = list(c('Slow','Med'),c('Med','Fast'),c('Slow','Fast')), size=6) +
+  theme(legend.position = 'none') +
+  scale_y_continuous(expand = expansion(mult = 0.1)) +
+  facet_wrap('Feature',nrow=1) + ylab('') + xlab('MDS-UPDRS Part IV Progression') +
+  scale_fill_grey(start = 0.5, end = 1)
+
+ggarrange(plotlist=list(p1,p2,p3),nrow=3,heights = c(1,1,1.1))
+ggsave("../Results/Supp Figures/Figure S7 - RF Boxplot.pdf", height=10,width=11)
+```

@@ -41,5 +41,5 @@ bl %>%
             label = paste0('β=',round(p2[2,1],2),', P=',format(p2[2,4],digits = 2,scientific = T))) +
   theme_classic(base_size = 20)
 
-ggsave("../Results/Supp Figures/Figure S6 - Blautia.tiff", height = 4, width = 4)
+ggsave("../Results/Supp Figures/Figure S6 - Blautia.pdf", height = 4, width = 4.5)
 ```

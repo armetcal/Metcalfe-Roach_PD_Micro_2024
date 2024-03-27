@@ -1,5 +1,5 @@
 ---
-title: "3a. Functional Data - Diversity"
+title: "Functional Data - Diversity"
 author: "Avril Metcalfe-Roach"
 date: "`r Sys.Date()`"
 output: html_document
@@ -200,6 +200,6 @@ temp$`KEGG` = temp$`KEGG` +
 
 ggarrange(plotlist=temp, common.legend = T)
 
-ggsave('../Results/Supplementary Figures/Fig. S3 - Functional Beta Diversity.png',width = 8,height=8)
+ggsave('../Results/Supp Figures/Figure S2 - Functional Beta Diversity.pdf',width = 8,height=8)
 ```
 

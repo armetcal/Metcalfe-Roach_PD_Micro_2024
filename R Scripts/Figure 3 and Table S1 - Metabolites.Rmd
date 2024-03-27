@@ -1,0 +1,431 @@
+---
+title: "5a. Species vs Proteolytic Metabolites"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(scales)
+
+# Taxonomy Data - CLR transformed
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% microbiome::transform('clr')
+# Significant microbially-derived metabolites from previous paper (serum metabolomics)
+# p-cresol and phenylacetylglutamine
+met = read.csv('../Reference Files/normalized_proteolytic_metabolites.csv')
+
+# Load functions that allow high-throughput Spearman & GLM analysis
+source('999. Cross-Sectional Correlation Functions.R')
+```
+
+```{r Prep dataset}
+# Load sig taxa
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx',sheet='Species') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the species to test
+# Include F. prausnitzii because of its strong association with 
+#  Ctrl-associated pathways (Table 2)
+psig = readxl::read_xlsx('../Results/Table 1 - Stratified Hits.xlsx') %>%
+  filter(`Total (%)`>=33) %>% # at least 10% of the functional hits reproduced
+  mutate(Taxon = sapply(Taxon,function(x) paste0('s__',x) %>% str_replace_all(' ','_'))) %>% 
+  pull(Taxon)
+sig = c(temp2[['Species']],psig) %>% unique
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-any_of(other_levels),-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance)
+
+# Combine with CRP and metabolomic data
+psm = psm %>% left_join(met)
+```
+
+# SPECIES ANALYSIS
+
+## Univariate Analysis
+
+```{r}
+# Filter out NA values
+temp = psm %>% filter(!is.na(pcresol))
+spearman.lax = correlate_met(temp, 'pcresol',grp='All') %>% 
+  rbind(correlate_met(temp, 'phenylacetylglutamine',grp='All')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='PD'),'pcresol',grp='PD')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='PD'),'phenylacetylglutamine',grp='PD')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='Ctrl'),'pcresol',grp='Ctrl')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='Ctrl'),'phenylacetylglutamine',grp='Ctrl'))
+```
+
+```{r SET ORDER FOR ALL PLOTS}
+# Arrange metabolites by p-cresol estimates, group 'all' ~~~~~~~~~~~~~
+species_order = spearman.lax %>% filter(group=='All',variable=='pcresol') %>% 
+  arrange(rho)
+species_order$taxon = str_remove_all(species_order$taxon,'s__') %>% str_replace_all('_',' ')
+```
+
+```{r Figure}
+# Edit levels for plotting
+spearman.lax[spearman.lax=='pcresol'] = 'p-Cresol'
+spearman.lax[spearman.lax=='phenylacetylglutamine'] = 'Phenylacetylglutamine'
+spearman.lax$taxon = str_remove_all(spearman.lax$taxon,'s__') %>% str_replace_all('_',' ')
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = spearman.lax %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(variable %in% vars) %>% 
+    mutate(variable = ifelse(variable=='Phenylacetylglutamine','Phenylacetyl-\nglutamine',variable)) %>% 
+    ggplot(aes(group,taxon,col = rho)) +
+    geom_point(size =14) +
+    theme_classic(base_size = 16) +
+    scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.25) +
+    geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    facet_wrap('variable')
+  return(p)
+}
+
+spearman.lax$taxon = factor(spearman.lax$taxon, levels = species_order$taxon)
+
+# Plot amino acids
+p1 = prep_plot(c('Phenylacetylglutamine','p-Cresol'))
+
+# ggsave('../Results/Supplementary Figures/Fig. 3ab - Species vs Metabolites - Univar.png',height=5.5,width=8)
+```
+
+## Multivariate Analysis 
+
+```{r}
+sigtaxa = spearman.lax %>% filter(qval<0.05) %>% pull(taxon) %>% unique() %>% as.character()
+sigtaxa = str_replace_all(sigtaxa,' ','_')
+sigtaxa = paste('s__',sigtaxa,sep='')
+
+sig2 = sig[sig %in% sigtaxa]
+
+# Filter out NA values
+temp = psm %>% filter(!is.na(pcresol))
+glm.lax = glm_met(temp,'pcresol',grp='All',incl_lax = F) %>% 
+  rbind(glm_met(temp,'phenylacetylglutamine',grp='All',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='PD'),'pcresol',grp='PD',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='PD'),'phenylacetylglutamine',grp='PD',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='Ctrl'),'pcresol',grp='Ctrl',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='Ctrl'),'phenylacetylglutamine',grp='Ctrl',incl_lax = F))
+
+# Extract just the relevant rows for plotting
+glm_species = glm.lax %>% filter(str_detect(Explanatory,'Microbe'))
+```
+
+```{r Figure}
+# Edit levels for plotting
+glm_species[glm_species=='pcresol'] = 'p-Cresol'
+glm_species[glm_species=='phenylacetylglutamine'] = 'Phenylacetylglutamine'
+glm_species$Taxon = str_remove_all(glm_species$Taxon,'s__') %>% str_replace_all('_',' ')
+
+# Filter to only include stuff that was significant in the total cohort univariately
+glm_species2 = glm_species %>% 
+  left_join(spearman.lax %>% 
+              filter(group=='All') %>% 
+              mutate(qval = as.numeric(qval<0.05)) %>% 
+              select(taxon,variable,qval) %>%
+              rename(Taxon=taxon,Response=variable,Univar = qval)) %>% 
+  filter(Univar==1) %>% # sig univariately in total cohort
+  group_by(group,Response) %>% 
+  mutate(qval=p.adjust(pval,method='BH')) %>% ungroup
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = spearman.lax %>% 
+    left_join(glm_species2 %>% rename(taxon=Taxon,variable=Response,mult=qval) %>% 
+                select(group,taxon, variable,mult)) %>% 
+                mutate(mult = ifelse(is.na(mult),'NS',ifelse(mult<0.05,"Sig","NS"))) %>% 
+    mutate(taxon = factor(.$taxon, levels = species_order$taxon)) %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(variable %in% vars) %>% 
+    mutate(variable = ifelse(variable=='Phenylacetylglutamine','Phenylacetyl-\nglutamine',variable)) %>% 
+    ggplot(aes(group,taxon,fill = rho, col=mult)) +
+    geom_point(size =14, pch=21,stroke=1.3) +
+    theme_classic(base_size = 18) +
+    scale_fill_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    scale_color_manual(values = c('white','black')) +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.25) +
+    # geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    facet_wrap('variable')
+  return(p)
+}
+
+# Plot amino acids
+plot.species = prep_plot(c('Phenylacetylglutamine','p-Cresol'))
+```
+
+## Plot key results
+```{r}
+# Significant after modeling
+temp = glm_species2 %>% rename(taxon=Taxon,variable=Response,mult=qval) %>% 
+                select(group,taxon, variable,mult) %>% 
+  filter(mult<0.05)
+
+# Obeum
+p1 = psm %>% pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine')) %>% 
+  ggplot(aes(s__Blautia_obeum,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ggpubr::stat_cor(method='spearman',cor.coef.name = 'rho',size=6,label.y.npc = 'bottom') +
+  ylab('Serum Concentration') + xlab('Blautia obeum') +
+  facet_wrap('met')
+
+# Wexlerae
+p2 = psm %>%
+  mutate(met = 'p-Cresol') %>% 
+  ggplot(aes(s__Blautia_wexlerae,pcresol,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ggpubr::stat_cor(method='spearman',cor.coef.name = 'rho',size=6,label.y.npc = 'bottom') +
+  ylab(NULL) + xlab('Blautia welxerae') +
+  facet_wrap('met')
+
+plot.species.indiv = ggarrange(plotlist = list(p1,p2), common.legend = T, legend = 'right', widths = c(2,1),nrow = 1)
+```
+
+# METACYC ANALYSIS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+# Taxonomy Data - CLR transformed
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["pwy"]] %>% microbiome::transform('clr')
+
+# Load sig taxa
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='multivar') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the pathways to test
+sig = temp2[['Species']]
+
+# Select species and melt phyloseq object
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance)
+
+# Combine the datasets
+psm = psm %>% left_join(met)
+```
+
+## Univariate Analysis
+
+```{r}
+# Filter out NA values
+temp = psm %>% filter(!is.na(pcresol))
+spearman.lax = correlate_met(temp, 'pcresol',grp='All') %>% 
+  rbind(correlate_met(temp, 'phenylacetylglutamine',grp='All')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='PD'),'pcresol',grp='PD')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='PD'),'phenylacetylglutamine',grp='PD')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='Ctrl'),'pcresol',grp='Ctrl')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='Ctrl'),'phenylacetylglutamine',grp='Ctrl'))
+
+# Extract just the relevant rows for plotting
+spearman.lax = spearman.lax %>%
+  mutate(taxon = str_replace(taxon, '[&]beta;-D','B-D')) %>% 
+  mutate(taxon = str_wrap(taxon,40))
+```
+
+```{r SET ORDER FOR ALL PLOTS}
+# Arrange metabolites by p-cresol estimates, group 'all' ~~~~~~~~~~~~~
+species_order = spearman.lax %>% filter(group=='All',variable=='pcresol') %>% 
+  arrange(rho)
+species_order$taxon = str_remove_all(species_order$taxon,'s__') %>% str_replace_all('_',' ')
+```
+
+```{r Figure}
+# Edit levels for plotting
+spearman.lax[spearman.lax=='pcresol'] = 'p-Cresol'
+spearman.lax[spearman.lax=='phenylacetylglutamine'] = 'Phenylacetylglutamine'
+spearman.lax$taxon = str_remove_all(spearman.lax$taxon,'s__') %>% str_replace_all('_',' ')
+
+spearman.lax$taxon = factor(spearman.lax$taxon, levels = species_order$taxon)
+```
+
+## Multivariate Analysis 
+
+```{r}
+sigtaxa = spearman.lax %>% filter(qval<0.05) %>% pull(taxon) %>% unique() %>% as.character()
+
+sig2 = sig %>% str_replace('[&]beta;-D','B-D') %>% str_wrap(40)
+sig2 = sig2[sig2 %in% sigtaxa]
+
+# Filter out NA values
+temp = psm %>% filter(!is.na(pcresol))
+glm.lax = glm_met(temp,'pcresol',grp='All',incl_lax = F) %>% 
+  rbind(glm_met(temp,'phenylacetylglutamine',grp='All',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='PD'),'pcresol',grp='PD',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='PD'),'phenylacetylglutamine',grp='PD',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='Ctrl'),'pcresol',grp='Ctrl',incl_lax = F)) %>% 
+  rbind(glm_met(temp %>% filter(Status=='Ctrl'),'phenylacetylglutamine',grp='Ctrl',incl_lax = F))
+
+# Extract just the relevant rows for plotting
+glm_species = glm.lax %>% filter(str_detect(Explanatory,'Microbe'))
+```
+
+```{r Figure}
+# Edit levels for plotting
+glm_species[glm_species=='pcresol'] = 'p-Cresol'
+glm_species[glm_species=='phenylacetylglutamine'] = 'Phenylacetylglutamine'
+glm_species$Taxon = str_remove_all(glm_species$Taxon,'s__') %>% str_replace_all('_',' ') %>%
+  str_replace('[&]beta;-D','B-D') %>% str_wrap(40)
+
+# Filter to only include stuff that was significant in the total cohort univariately
+glm_species2 = glm_species %>% 
+  left_join(spearman.lax %>% 
+              filter(group=='All') %>% 
+              mutate(qval = as.numeric(qval<0.05)) %>% 
+              select(taxon,variable,qval) %>%
+              rename(Taxon=taxon,Response=variable,Univar = qval)) %>% 
+  filter(Univar==1) %>% # sig univariately in total cohort
+  group_by(group,Response) %>% 
+  mutate(qval=p.adjust(pval,method='BH')) %>% ungroup
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = spearman.lax %>% 
+    left_join(glm_species2 %>% rename(taxon=Taxon,variable=Response,mult=qval) %>% 
+                select(group,taxon, variable,mult)) %>% 
+                mutate(mult = ifelse(is.na(mult),'NS',ifelse(mult<0.05,"Sig","NS"))) %>% 
+    mutate(taxon = factor(.$taxon, levels = species_order$taxon)) %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(variable %in% vars) %>% 
+    mutate(variable = ifelse(variable=='Phenylacetylglutamine','Phenylacetyl-\nglutamine',variable)) %>% 
+    ggplot(aes(group,taxon,fill = rho, col=mult)) +
+    geom_point(size =14, pch=21,stroke=1.3) +
+    theme_classic(base_size = 18) +
+    scale_fill_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    scale_color_manual(values = c('white','black')) +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.2) +
+    # geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    facet_wrap('variable')
+  return(p)
+}
+
+# Plot amino acids
+plot.meta = prep_plot(c('Phenylacetylglutamine','p-Cresol'))
+```
+
+## Plot key results
+
+```{r}
+# Significant after modeling
+temp = glm_species2 %>% rename(taxon=Taxon,variable=Response,mult=qval) %>% 
+                select(group,taxon, variable,mult) %>% 
+  filter(mult<0.05)
+
+# Anaerobic Energy Metabolism
+plot.meta.indiv = psm %>% pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine')) %>% 
+  ggplot(aes(`PWY-7383: anaerobic energy metabolism (invertebrates, cytosol)`,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ggpubr::stat_cor(method='spearman',cor.coef.name = 'rho',size=6,label.y.npc = 'bottom') +
+  ylab('Serum Concentration') + xlab('Anaerobic Energy Metabolism (PWY-7383)') +
+  facet_wrap('met') +
+  theme(legend.position = 'none')
+```
+
+# METACYC EC CHILDREN
+
+```{r}
+# These are EC terms from anaerobic energy metabolism
+child_meta = c('PEPDEPHOS-RXN','RXN-12481','4.1.1.32-RXN','ALANINE-AMINOTRANSFERASE-RXN','ALARACECAT-RXN','ASPAMINOTRANS-RXN','MALATE-DEH-RXN')
+  
+ps2 = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["rxn"]] %>% microbiome::transform('clr') %>% psmelt() %>% select(Species,everything())
+
+ps3 = ps2 %>% filter(str_detect(Species,child_meta[1]) |
+                       str_detect(Species,child_meta[2]) |
+                       str_detect(Species,child_meta[3]) |
+                       str_detect(Species,child_meta[4]) |
+                       str_detect(Species,child_meta[5]) |
+                       str_detect(Species,child_meta[6]) |
+                       str_detect(Species,child_meta[7]))
+
+# Load stats
+temp = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='univar') %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(SigU = median(q_val<0.05)) %>% ungroup() %>% 
+  filter(Species %in% ps3$Species)
+
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% temp$Species) %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(SigM = median(q_val<0.05)) %>% ungroup()
+
+sigsum = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='univar') %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(Uni = median(q_val)) %>% ungroup() %>% 
+  filter(Species %in% ps3$Species) %>% 
+  left_join(readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% temp$Species) %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(Multi = median(q_val)) %>% ungroup()) %>% 
+  filter(Species !='RXN-12481: NO_NAME') %>% 
+  rename('EC Term' = Species) %>% 
+  mutate(Sig = ifelse(Uni<0.05 & Multi<0.05,'Sig','ns'))
+
+writexl::write_xlsx(list(sigsum),'../Results/Tables/Table S1 - EC terms associated with PWY 7383.xlsx')
+
+# Plot these ones
+ps4 = ps3 %>% filter(Species %in% sigsum$`EC Term`[sigsum$Sig=='Sig']) %>% 
+  left_join(met) %>% 
+  filter(!is.na(pcresol))
+
+plot.ec = ps4 %>% 
+  pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine')) %>% 
+  ggplot(aes(Abundance,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ggpubr::stat_cor(method='spearman',cor.coef.name = 'rho',size=6,label.y.npc = 'bottom') +
+  ylab('Serum Concentration') + xlab('4.1.1.32-RXN (Oxaloacetate to PEP)') +
+  facet_wrap('met') +
+  theme(legend.position = 'none')
+```
+
+# COMPILE FIGURE
+
+```{r}
+p1 = ggarrange(plotlist = list(plot.species, plot.meta), ncol = 2, widths = c(3.4,4))
+p2 = ggarrange(plotlist = list(plot.species.indiv, NULL), ncol = 2, widths = c(6,1))
+p3 = ggarrange(plotlist = list(plot.meta.indiv, plot.ec,NULL), ncol = 3, widths = c(5,5,1))
+p4 = ggarrange(plotlist = list(p1, p2, p3), ncol = 1, heights = c(2.5,2,2))
+
+ggsave('../Results/Figures/Figure 3 - Metabolites.pdf',height=14, width = 17.5)
+```
+

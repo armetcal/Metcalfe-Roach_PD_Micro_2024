@@ -276,7 +276,7 @@ dist_all_plot = dist_all.noinf %>%
 ```{r}
 p_out = ggarrange(plotlist = list(dist_plot, bw_plot, close_plot, dist_all_plot))
 p_out
-ggsave('../Results/Figures/Figure 1 - Microbial Network Analysis.tiff', height = 8.5, width = 12)
+ggsave('../Results/Figures/Figure 1 - Microbial Network Analysis.pdf', height = 8.5, width = 12)
 ```
 
 
@@ -329,7 +329,7 @@ s1_plot = bw %>% group_by(Phylum) %>% add_tally %>%
 
 ```{r Combine}
 ggarrange(plotlist = list(net_plot, s1_plot), ncol = 2, widths = c(3,2))
-ggsave('../Results/Supp Figures/Figure S1 - Network and Betweenness Centrality Phylum.tiff', height = 5, width = 17)
+ggsave('../Results/Supp Figures/Figure S1 - Network and Betweenness Centrality Phylum.pdf', height = 5, width = 17)
 ```
 
 # (No Figure) Number of taxa with zero connections

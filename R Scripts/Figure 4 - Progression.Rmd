@@ -1,0 +1,561 @@
+---
+title: "6b. Disease Progression - Species"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(lme4)
+library(lmerTest)
+library(scales)
+```
+
+# LONGITUDINAL ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# SPECIES
+
+```{r}
+# Prepare the data ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# We will combine our longitudinal dataset with our taxonomy data, where only the microbes of interest are included.
+
+# Variables to test
+vars = c('mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')
+
+# Load taxonomic data, CLR transform
+ps = readRDS('../Reference Files/taxonomy_phyloseq.rds') %>% microbiome::transform('clr')
+
+# Load sig taxa
+# Multivar
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx',sheet='Species') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the species to test
+# Include F. prausnitzii because of its strong association with 
+#  most Ctrl-associated pathways (Table 2)
+sig = c(temp2[['Species']],'s__Faecalibacterium_prausnitzii') %>% unique
+# sig = c(temp2[['Species']],'s__Faecalibacterium_prausnitzii')
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth,OTU,Abundance,Kingdom:Species) %>% unique
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(Sample,redcap_event_name,months_last_visit,all_of(vars))
+
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+long = long0 %>% left_join(psm, multiple='all')
+
+# Center static predictors, normalize where necessary.
+# This reduces spurious correlations as explained in LMER documentation.
+# Center each OTU separately.
+pd = long %>% filter(Status == 'PD') %>% group_by(OTU) %>% 
+  # Rescale to range of 0-1
+  mutate(Abundance = rescale(Abundance)) %>% 
+  # Center around 0
+  mutate(Abundance = Abundance-mean(Abundance,na.rm=T)) %>% ungroup()
+
+# Rescale to 0-1
+pd = pd %>% mutate_at(vars('months_last_visit',all_of(vars),'depth',contains('base.')),rescale)
+# 
+# # Center scale
+pd = pd %>% mutate_at(vars('months_last_visit',all_of(vars),'depth',contains('base.')),
+                      function(x) x - mean(x,na.rm=T))
+```
+
+## 'Univariate' model that only controls for age and baseline
+
+```{r}
+# Univar
+stats.uni = tibble()
+for(v in vars){
+  for(s in sig){
+    # s = sig[1]
+    temp = pd %>% filter(Species == s)
+    names(temp)[names(temp)==v] = 'test'
+    
+    lmertest = lmer(test ~ months_last_visit*Abundance + (months_last_visit|Sample), data = temp,
+                    REML = F,
+                    control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+    
+    L = lmertest %>% broom.mixed::tidy() %>% as.tibble() %>% mutate(Variable = v, Species = s)
+    stats.uni = stats.uni %>% rbind(L)
+  }
+}
+
+stats.uni.filt = stats.uni %>% filter(str_detect(term,'months_last_visit:Abundance')) %>%
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup
+```
+
+## 'Multivar' model that controls for relevant microbial and non-microbial variables
+
+```{r}
+# Univar
+stats.multi = tibble()
+for(v in vars){
+  for(s in sig){
+    # s = sig[1]
+    temp = pd %>% filter(Species == s)
+    names(temp)[names(temp)==v] = 'test'
+    
+    lmertest = lmer(test ~ months_last_visit*Abundance + laxatives + Sex + depth + (months_last_visit|Sample), data = temp,
+                    REML = F,
+                    control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+    
+    L = lmertest %>% broom.mixed::tidy() %>% as.tibble() %>% mutate(Variable = v, Species = s)
+    stats.multi = stats.multi %>% rbind(L)
+  }
+}
+
+stats.multi.filt = stats.multi %>% filter(str_detect(term,'months_last_visit:Abundance')) %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup
+```
+
+
+## Plot
+
+```{r}
+tempstats.multi = stats.multi %>% filter(term=='months_last_visit:Abundance') %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup %>% 
+  mutate(Qval = ifelse(q.value>0.05,'',
+                       ifelse(q.value>0.01,'*',
+                              ifelse(q.value>0.001,'**',
+                                     ifelse(q.value<=0.001,'***',''))))) %>% 
+  mutate(Qval2 = ifelse(q.value>0.1,'',
+                        ifelse(q.value>0.05,'+',''))) %>% 
+  rename('Estimate' = estimate)
+
+# Edit levels for plotting
+tempstats.multi$Variable[tempstats.multi$Variable=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds1.total'] = 'UPDRS 1'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds2.total'] = 'UPDRS 2'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds3.total'] = 'UPDRS 3'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds4.total'] = 'UPDRS 4'
+tempstats.multi$Species = str_remove_all(tempstats.multi$Species,'s__') %>% str_replace_all('_',' ')
+
+# Arrange data
+order_species = tempstats.multi %>% filter(Variable=='Levodopa\nEq. Dose') %>% arrange(`Estimate`)
+tempstats.multi$Species = factor(tempstats.multi$Species, levels = order_species$Species)
+
+tempstats.multi$Variable = factor(tempstats.multi$Variable,levels = c('Levodopa\nEq. Dose','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4'))
+tempstats.multi = tempstats.multi %>% droplevels() %>% as.data.frame() %>% filter(!is.na(Variable))
+
+plot_a = tempstats.multi %>% ggplot(aes(Variable,Species,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25) +
+  geom_text(aes(label=Qval2),size = 12, col = 'white',nudge_y = 0)
+```
+
+# METACYC
+
+```{r}
+# MetaCyc Data - CLR transformed
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["pwy"]] %>% microbiome::transform('clr')
+
+# Load sig pwy
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='multivar') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the pathways to test
+sig = temp2[['Species']]
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth,OTU,Abundance,Species) %>% unique
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+table(long0$redcap_event_name)
+
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+# baseline bristol rating and microbial abundances are static variables.
+long = long0 %>% left_join(psm, multiple='all')
+attach(long %>% select(Status,redcap_event_name,Sample) %>% unique)
+table(Status,redcap_event_name)
+detach()
+
+# Center static predictors, normalize where necessary.
+# This reduces spurious correlations as explained in LMER documentation.
+# Center each OTU separately.
+pd = long %>% filter(Status == 'PD') %>% group_by(OTU) %>% 
+  # Rescale to range of 0-1
+  mutate(Abundance = rescale(Abundance)) %>% 
+  # Center around 0
+  mutate(Abundance = Abundance-mean(Abundance,na.rm=T)) %>% ungroup()
+
+# Rescale to 0-1
+pd = pd %>% mutate_at(vars('months_last_visit',all_of(vars),'depth',contains('base.')),rescale)
+# 
+# # Center scale
+pd = pd %>% mutate_at(vars('months_last_visit',all_of(vars),'depth',contains('base.')),
+                      function(x) x - mean(x,na.rm=T))
+```
+
+## 'Univariate' model that only controls for age and baseline
+
+```{r}
+# Univar
+stats.uni = tibble()
+for(v in vars){
+  for(s in sig){
+    # v = vars[1]
+    # s = sig[1]
+    temp = pd %>% filter(Species == s)
+    names(temp)[names(temp)==v] = 'test'
+    
+    lmertest = lmer(test ~ months_last_visit*Abundance + (months_last_visit|Sample), data = temp,
+                    REML = F,
+                    control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+    
+    L = lmertest %>% broom.mixed::tidy() %>% as.tibble() %>% mutate(Variable = v, Species = s)
+    stats.uni = stats.uni %>% rbind(L)
+  }
+}
+
+stats.uni.filt = stats.uni %>% filter(str_detect(term,'months_last_visit:Abundance')) %>%
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup
+```
+
+## 'Multivar' model that controls for relevant microbial and non-microbial variables
+
+```{r}
+stats.multi = tibble()
+for(v in vars){
+  for(s in sig){
+    # s = sig[1]
+    temp = pd %>% filter(Species == s)
+    names(temp)[names(temp)==v] = 'test'
+    
+    lmertest = lmer(test ~ months_last_visit*Abundance + laxatives + Sex + depth + (months_last_visit|Sample), data = temp,
+                    REML = F,
+                    control = lmerControl(optimizer="bobyqa", optCtrl=list(maxfun=100000)))
+    
+    L = lmertest %>% broom.mixed::tidy() %>% as.tibble() %>% mutate(Variable = v, Species = s)
+    stats.multi = stats.multi %>% rbind(L)
+  }
+}
+
+stats.multi.filt = stats.multi %>% filter(str_detect(term,'months_last_visit:Abundance')) %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup
+```
+
+## Plot
+
+```{r}
+tempstats.multi = stats.multi %>% filter(term=='months_last_visit:Abundance') %>% 
+  group_by(Variable,term) %>% 
+  mutate(q.value = p.adjust(p.value, method='BH')) %>% ungroup %>% 
+  mutate(Qval = ifelse(q.value>0.05,'',
+                       ifelse(q.value>0.01,'*',
+                              ifelse(q.value>0.001,'**',
+                                     ifelse(q.value<=0.001,'***',''))))) %>% 
+  mutate(Qval2 = ifelse(q.value>0.1,'',
+                        ifelse(q.value>0.05,'+',''))) %>% 
+  rename('Estimate' = estimate) %>%
+  mutate(Species = str_replace(Species, '[&]beta;-D','B-D')) %>% 
+  mutate(Species = str_wrap(Species,40))
+
+# Edit levels for plotting
+tempstats.multi$Variable[tempstats.multi$Variable=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds1.total'] = 'UPDRS 1'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds2.total'] = 'UPDRS 2'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds3.total'] = 'UPDRS 3'
+tempstats.multi$Variable[tempstats.multi$Variable=='mds4.total'] = 'UPDRS 4'
+tempstats.multi$Species = str_remove_all(tempstats.multi$Species,'s__') %>% str_replace_all('_',' ')
+
+tempstats.multi$Variable = factor(tempstats.multi$Variable,levels = c('Levodopa\nEq. Dose','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4'))
+tempstats.multi = tempstats.multi %>% droplevels() %>% as.data.frame() %>% filter(!is.na(Variable))
+  
+# Arrange data
+order_meta = tempstats.multi %>% filter(Variable=='Levodopa\nEq. Dose') %>% arrange(`Estimate`)
+tempstats.multi$Species = factor(tempstats.multi$Species, levels = order_meta$Species)
+
+plot_b = tempstats.multi %>% ggplot(aes(Variable,Species,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25) +
+  geom_text(aes(label=Qval2),size = 12, col = 'white',nudge_y = 0)
+```
+
+# BASELINE SPECIES ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+# Taxonomy Data - CLR transformed
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% microbiome::transform('clr')
+# Load functions that allow high-throughput Spearman & GLM analysis
+source('999. Cross-Sectional Correlation Functions.R')
+
+# Load sig taxa
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx',sheet='Species') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the species to test
+# Include F. prausnitzii because of its strong association with 
+#  Ctrl-associated pathways (Table 2)
+sig = c(temp2[['Species']],'s__Faecalibacterium_prausnitzii')
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-any_of(other_levels),-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  select(-any_of(c('bdi_total','fss_total','mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')))
+
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+long = long0 %>% filter(months_last_visit==0) %>% unique()
+
+# Combine with CRP and metabolomic data
+psm = psm %>% left_join(long)
+
+# Filter for only PD
+psm = psm %>% filter(Status=='PD')
+```
+
+## Univariate Analysis
+
+```{r, include=FALSE}
+spearman = correlate_met(psm %>% filter(!is.na(mds1.total),!is.na(Disease.duration)),
+                         'mds1.total',grp=NA) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds2.total),!is.na(Disease.duration)),
+                          'mds2.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds3.total),!is.na(Disease.duration)),
+                          'mds3.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds4.total),!is.na(Disease.duration)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(bdi_total),!is.na(Disease.duration)),
+                           'bdi_total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(fss_total),!is.na(Disease.duration)),
+                           'fss_total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(levo.eq.dose),!is.na(Disease.duration)),
+                           'levo.eq.dose',grp=NA))
+```
+
+## Multivariate Analysis
+
+```{r}
+glm = glm_met_severity(psm %>% filter(!is.na(mds1.total),!is.na(Disease.duration)),
+                           'mds1.total',grp=NA) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds2.total),!is.na(Disease.duration)),
+                           'mds2.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds3.total),!is.na(Disease.duration)),
+                           'mds3.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds4.total),!is.na(Disease.duration)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(bdi_total),!is.na(Disease.duration)),
+                           'bdi_total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(fss_total),!is.na(Disease.duration)),
+                           'fss_total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(levo.eq.dose),!is.na(Disease.duration)),
+                           'levo.eq.dose',grp=NA))
+
+# Extract just the relevant rows for plotting
+glm_species = glm %>% filter(str_detect(Explanatory,'Microbe'))
+```
+
+## Multivar Plots
+
+```{r}
+# Edit levels for plottin
+glm_species$Response[glm_species$Response=='mds1.total'] = 'UPDRS 1'
+glm_species$Response[glm_species$Response=='mds2.total'] = 'UPDRS 2'
+glm_species$Response[glm_species$Response=='mds3.total'] = 'UPDRS 3'
+glm_species$Response[glm_species$Response=='mds4.total'] = 'UPDRS 4'
+glm_species$Response[glm_species$Response=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+glm_species$Response[glm_species$Response=='bdi_total'] = 'Total BDI'
+glm_species$Response[glm_species$Response=='fss_total'] = 'Total FSS'
+glm_species$Taxon = str_remove_all(glm_species$Taxon,'s__') %>% str_replace_all('_',' ')
+
+glm_species$Response = factor(glm_species$Response,levels =  c('Levodopa\nEq. Dose','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4','Total BDI','Total FSS'))
+
+# Plot ordering
+order = glm_species %>% filter(Response=='Levodopa\nEq. Dose') %>% 
+  arrange(Estimate)
+order$Taxon = str_remove_all(order$Taxon,'s__') %>% str_replace_all('_',' ')
+glm_species$Taxon = factor(glm_species$Taxon, levels = order_species$Species)
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = glm_species %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(Response %in% vars) %>% 
+    ggplot(aes(Response,Taxon,col = Estimate)) +
+    geom_point(size =14) +
+    theme_classic(base_size = 16) +
+    scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.25) +
+    geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  return(p)
+}
+
+# Plots
+plot_c = prep_plot(unique(glm_species$Response))
+```
+
+# BASELINE METACYC ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r}
+# MetaCyc Data
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["pwy"]] %>% microbiome::transform('clr')
+# Load functions that allow high-throughput Spearman & GLM analysis
+source('999. Cross-Sectional Correlation Functions.R')
+```
+
+```{r}
+# Load sig pwy
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='multivar') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the pathways to test
+sig = temp2[['Species']]
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-any_of(other_levels),-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  select(-any_of(c('bdi_total','fss_total','mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')))
+
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+long = long0 %>% filter(months_last_visit==0) %>% unique()
+
+# Combine with CRP and metabolomic data
+psm = psm %>% left_join(long)
+
+# Filter for only PD
+psm = psm %>% filter(Status=='PD')
+```
+
+## Univariate Analysis
+
+```{r}
+spearman = correlate_met(psm %>% filter(!is.na(mds1.total),!is.na(Disease.duration)),
+                         'mds1.total',grp=NA) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds2.total),!is.na(Disease.duration)),
+                          'mds2.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds3.total),!is.na(Disease.duration)),
+                          'mds3.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(mds4.total),!is.na(Disease.duration)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(bdi_total),!is.na(Disease.duration)),
+                           'bdi_total',grp=NA)) %>% 
+  rbind(correlate_met(psm %>% filter(!is.na(fss_total),!is.na(Disease.duration)),
+                           'fss_total',grp=NA)) %>%
+  rbind(correlate_met(psm %>% filter(!is.na(levo.eq.dose),!is.na(Disease.duration)),
+                           'levo.eq.dose',grp=NA)) %>%
+  mutate(taxon = str_replace(taxon, '[&]beta;-D','B-D')) %>% 
+  mutate(taxon = str_wrap(taxon,40))
+```
+
+## Multivariate Analysis
+
+```{r}
+glm = glm_met_severity(psm %>% filter(!is.na(mds1.total),!is.na(Disease.duration)),
+                           'mds1.total',grp=NA) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds2.total),!is.na(Disease.duration)),
+                           'mds2.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds3.total),!is.na(Disease.duration)),
+                           'mds3.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(mds4.total),!is.na(Disease.duration)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(bdi_total),!is.na(Disease.duration)),
+                           'bdi_total',grp=NA)) %>% 
+  rbind(glm_met_severity(psm %>% filter(!is.na(fss_total),!is.na(Disease.duration)),
+                           'fss_total',grp=NA)) %>%
+  rbind(glm_met_severity(psm %>% filter(!is.na(levo.eq.dose),!is.na(Disease.duration)),
+                           'levo.eq.dose',grp=NA)) %>%
+  mutate(Taxon = str_replace(Taxon, '[&]beta;-D','B-D')) %>% 
+  mutate(Taxon = str_wrap(Taxon,40))
+
+# Extract just the relevant rows for plotting
+glm_species = glm %>% filter(str_detect(Explanatory,'Microbe'))
+```
+
+## Multivar Plots
+
+```{r}
+# Edit levels for plotting
+glm_species$Response[glm_species$Response=='mds1.total'] = 'UPDRS 1'
+glm_species$Response[glm_species$Response=='mds2.total'] = 'UPDRS 2'
+glm_species$Response[glm_species$Response=='mds3.total'] = 'UPDRS 3'
+glm_species$Response[glm_species$Response=='mds4.total'] = 'UPDRS 4'
+glm_species$Response[glm_species$Response=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+glm_species$Response[glm_species$Response=='bdi_total'] = 'Total BDI'
+glm_species$Response[glm_species$Response=='fss_total'] = 'Total FSS'
+glm_species$Taxon = str_remove_all(glm_species$Taxon,'s__') %>% str_replace_all('_',' ')
+
+glm_species$Response = factor(glm_species$Response,levels = c('Levodopa\nEq. Dose','UPDRS 1','UPDRS 2','UPDRS 3','UPDRS 4','Total BDI','Total FSS'))
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars){
+  p = glm_species %>% 
+    mutate(Qval = ifelse(qval>0.05,'',
+                        ifelse(qval>0.01,'*',
+                               ifelse(qval>0.001,'**',
+                                      ifelse(qval<=0.001,'***',''))))) %>% 
+    mutate(Qval2 = ifelse(qval>0.1,'',
+                         ifelse(qval>0.05,'+',''))) %>% 
+    filter(Response %in% vars) %>% 
+    ggplot(aes(Response,Taxon,col = Estimate)) +
+    geom_point(size =14) +
+    theme_classic(base_size = 16) +
+    scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    geom_text(aes(label=Qval),size = 10, col = 'white',nudge_y = -0.25) +
+    geom_text(aes(label=Qval2),size = 10, col = 'white',nudge_y = 0) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  return(p)
+}
+
+glm_species$Taxon = factor(glm_species$Taxon, levels = order_meta$Species)
+
+# Plots
+plot_d = prep_plot(unique(glm_species$Response))
+```
+
+# COMPILE PLOT
+
+```{r}
+p1 = ggarrange(plotlist = list(NULL,plot_a, NULL,plot_c), ncol = 4, widths = c(0.7,3.5,0.7,4), common.legend = F)
+p1
+p2 = ggarrange(plotlist = list(plot_b, plot_d), ncol = 2, widths = c(3.8,4), common.legend = F)
+p2
+p3 = ggarrange(plotlist = list(p1, p2), ncol = 1, nrow = 2, heights = c(1,1.1))
+p3
+
+ggsave('../Results/Figures/Figure 4 - Progression.pdf',height = 10.5, width = 18)
+```
+

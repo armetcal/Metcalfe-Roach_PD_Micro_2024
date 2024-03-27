@@ -317,6 +317,6 @@ plot_enrich = enrich3 %>%
 ```{r}
 p1 = ggarrange(plotlist = list(plot.taxa, plot.meta), nrow = 2)
 p2 = ggarrange(plotlist = list(p1,plot_enrich),ncol = 2)
-ggsave('../Results/Figures/Figure 2 - Diff Abundance and Enrichment.jpeg',plot = p2,height=12, width = 20)
+ggsave('../Results/Figures/Figure 2 - Diff Abundance and Enrichment.tiff',plot = p2,height=12, width = 20)
 ```
 

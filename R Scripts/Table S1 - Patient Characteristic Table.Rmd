@@ -1,0 +1,131 @@
+---
+title: "Table S1 - Patient Characteristic Table"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(tidyverse)
+# Load necessary packages
+library(sandwich)
+library(lmtest)
+
+# Load metagenomic data
+ps = readRDS('../Reference Files/taxonomy_phyloseq.rds') %>% 
+  subset_taxa(Species=='s__Blautia_obeum') %>% psmelt() %>% 
+  select(-OTU,-Abundance,-c(Kingdom:Species),-pcresol,-phenylacetylglutamine)
+
+# Other variables included in analysis
+# Metabolites that are bacterially associated and correlate with disease
+met = read.csv('../Reference Files/normalized_proteolytic_metabolites.csv')
+risk = read.csv('../Reference Files/Misc PD Risk.csv') # Other clinical variables of interest in PD
+
+# Recode variables
+df = ps %>% left_join(met) %>% left_join(risk) %>% 
+  select(-sample_Sample,-redcap_event_name,-entacapone,-contains('nona'),
+         -depth,-logcoffeeperday,-clinstate) %>% 
+  select(Sample,Status,Sex,Age,smokeprev_or_before_pd,coffee_per_day,laxatives,bristol,
+         pcresol,phenylacetylglutamine,bdi_total,fss_total,
+         Disease.duration,levo.eq.dose,hy,
+         mds1.total,mds2.total,mds3.total,mds4.total,mds.total) %>% 
+  rename(`Disease Duration` = Disease.duration, `Levodopa Equivalent Dose` = levo.eq.dose,
+         `Laxative Use` = laxatives, `Bristol Stool Rating` = bristol, 
+         `History of Smoking` = smokeprev_or_before_pd,`Coffee (Cups/Day)` = coffee_per_day,
+         `Beck Depression Inventory (/63)` = bdi_total, `Fatigue Severity Scale (/7)` = fss_total,
+         `Hoehn & Yahr` = hy, `Age (Years)` = Age,
+         `MDS-UPDRS 1` = mds1.total, `MDS-UPDRS 2` = mds2.total, `MDS-UPDRS 3` = mds3.total, 
+         `MDS-UPDRS 4` = mds4.total, `Total MDS-UPDRS` = mds.total,
+         `p-Cresol` = pcresol, Phenylacetylglutamine = phenylacetylglutamine)
+
+# Remove h&y for controls, unnecessary
+df$`Hoehn & Yahr`[df$Status=='Ctrl'] = NA
+```
+
+```{r}
+# Categorical variables
+df.cat = df %>% select(Sample,Status,Sex,`Laxative Use`,`History of Smoking`)
+cat = tibble()
+chi = tibble()
+# Save N, perform chi square analyses
+for(i in names(df.cat)[3:ncol(df.cat)]){
+  # i = 'Sex'
+  t = table(Status = df.cat$Status, test = df.cat[[i]]) 
+  c = chisq.test(t) %>% broom::tidy()
+  cat = rbind(cat,t %>% broom::tidy() %>% mutate(Var=i))
+  chi = rbind(chi,c %>% mutate(Var=i))
+}
+chi$Var[chi$Var=='History of Smoking'] = 'History of Smoking (Yes)'
+chi$Var[chi$Var=='Laxative Use'] = 'Laxative Use (Yes)'
+chi$Var[chi$Var=='Sex'] = 'Sex (Male)'
+
+cat2 = cat %>% 
+  mutate(test = ifelse(test=='0','No',ifelse(test=='1','Yes',test))) %>% 
+  arrange(test) %>% 
+  group_by(Status,Var) %>% 
+  mutate(pct = round(100*n[2L]/(n[1L]+n[2L]),1),
+         total = n[1L]+n[2L]) %>%
+  filter(test == test[2L]) %>% ungroup %>%
+  mutate(Var = paste(Var,' (',test,')',sep='')) %>% 
+  select(-test) %>% 
+  mutate(npct = paste0(n,' (',round(pct,1),'%)')) %>% 
+  select(-n,-pct) %>% rename(n=total)
+  
+# Numerical variables
+df.num = df %>% select(-all_of(names(df.cat)[3:ncol(df.cat)])) %>% 
+  pivot_longer(cols = -c(Sample,Status), names_to = 'Var', values_to = 'value') %>% 
+  filter(!is.na(value)) %>% 
+  group_by(Status,Var) %>% add_count() %>% ungroup %>% 
+  group_by(Status,Var,n) %>% 
+  summarize(medianIQR = paste0(round(median(value),2), ' (',round(IQR(value),2),')'))
+# Wilcox
+wil = df %>% select(-all_of(names(df.cat)[3:ncol(df.cat)])) %>% 
+  select(-contains('UPDRS'),-all_of(c('Levodopa Equivalent Dose','Disease Duration','Hoehn & Yahr'))) %>% 
+  pivot_longer(cols = -c(Sample,Status), names_to = 'Var', values_to = 'value') %>% 
+  filter(!is.na(value)) %>%
+  group_by(Var) %>%
+  group_modify(~wilcox.test(value~Status,data=.) %>% broom::tidy())
+
+# Combined
+lvls = tibble(Var = c('Sex (Male)','Age (Years)',
+         'History of Smoking (Yes)',"Coffee (Cups/Day)",
+         'Laxative Use (Yes)','Bristol Stool Rating',
+         "Beck Depression Inventory (/63)","Fatigue Severity Scale (/7)",
+         'p-Cresol','Phenylacetylglutamine',
+         'Disease Duration','Levodopa Equivalent Dose',
+         "Hoehn & Yahr",
+         "MDS-UPDRS 1","MDS-UPDRS 2","MDS-UPDRS 3","MDS-UPDRS 4","Total MDS-UPDRS"),
+         Group = c(rep('Demographics',4),rep('GI',2),rep('Mood',2),rep('Metabolites',2),
+                   rep('PD Data',8)))
+df.all = cat2 %>% full_join(df.num) %>% 
+  mutate(Var = factor(Var, levels = lvls$Var)) %>% arrange(Var) %>% 
+  left_join(lvls) %>% select(Group,everything()) %>% 
+  mutate(Statistic = ifelse(is.na(npct),medianIQR,npct)) %>% 
+  select(-npct,-medianIQR)
+df.all$Statistic[str_detect(df.all$Var,'UPDRS') & df.all$Status=='Ctrl'] = NA
+df.all$n[str_detect(df.all$Var,'UPDRS') & df.all$Status=='Ctrl'] = NA
+df.all = df.all %>% 
+  pivot_wider(names_from = Status, values_from = c(n,Statistic)) %>% 
+  select(Group,Var,contains('PD'),everything())
+
+  # Add statistics and edit names
+df.all2 = df.all %>% left_join(rbind(chi %>% select(Var,p.value),wil %>% select(Var,p.value)))
+df.all2 = df.all2 %>% rename(Variable = Var, `n (PD)` = n_PD, `n (Ctrl)` = n_Ctrl, `Statistic (PD)` = Statistic_PD, `Statistic (Ctrl)` = Statistic_Ctrl, `P value` = p.value)
+
+# Round P values to 2 sig digits OR < 0.001
+df.all3 = df.all2 %>% mutate(`P value` = sapply(df.all2$`P value`,
+                                                function(x){
+                                                  if(is.na(x)) return(NA)
+                                                  if(x<0.001) {
+                                                    return('<0.001')
+                                                  } else {
+                                                    return(as.character(signif(x,2)))
+                                                  }
+                                                }))
+```
+
+```{r}
+writexl::write_xlsx(df.all3, '../Results/Tables/Table S1 - Patient Characteristic Table.xlsx')
+```
+

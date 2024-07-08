@@ -1,0 +1,413 @@
+---
+title: "6a. Change in Disease Severity and Medication Over Time"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(lmerTest)
+library(scales)
+
+# Load participant data
+psm = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% 
+  subset_taxa(Species == 's__Blautia_obeum') %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth) %>% unique
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(-Disease.duration,-Status)
+table(is.na(long0$mds3.total))
+
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+# baseline bristol rating and microbial abundances are static variables.
+long = long0 %>% left_join(psm, multiple='all') %>% 
+  filter(Status=='PD')
+
+# Variables to test
+vars = c('mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')
+
+df0 = long %>% dplyr::select(Sample,redcap_event_name,months_last_visit,clinstate,all_of(vars)) 
+
+df = df0 %>%
+  # Normalize according to Figure 4
+  mutate(mds1.total = mds1.total %>% sqrt(),
+         mds2.total = mds2.total %>% sqrt(),
+         mds3.total = mds3.total %>% sqrt(),
+         mds4.total = mds4.total %>% sqrt(),
+         levo.eq.dose = levo.eq.dose %>% sqrt())
+
+source('C:/Users/armetcal/OneDrive - UBC/Grad School/CODES/R Functions/Linear Regression and Mixed Models with Assumption Testing.R')
+
+key = tibble(Variable = c("mds1.total","mds2.total","mds3.total",
+                          "mds4.total","levo.eq.dose"),
+             Fixed = c('MDS-UPDRS 1','MDS-UPDRS 2','MDS-UPDRS 3','MDS-UPDRS 4',
+                       'Levodopa\nEq. Dose'))
+```
+
+```{r}
+# Center static predictors, normalize where necessary.
+# This reduces spurious correlations as explained in LMER documentation.
+# Center each OTU separately.
+df = df %>%
+  # Rescale to range of 0-1
+  mutate_at(vars("mds1.total","mds2.total","mds3.total",
+                 "mds4.total","levo.eq.dose","months_last_visit"),rescale) %>%
+  # Center around 0
+  mutate_at(vars("mds1.total","mds2.total","mds3.total",
+                 "mds4.total","levo.eq.dose","months_last_visit"),
+            function(x){x-mean(x,na.rm=T)})
+```
+
+```{r Change in seveirty over time - mixed models}
+# This calculates the average change over time per variable, taking multiple measurements into account using mixed models.
+to_test = names(df)[str_detect(names(df),'mds.') | str_detect(names(df),'levo')]
+
+stats.multi = tibble()
+plots.multi = list()
+for(v in vars){
+    # v = to_test[1]
+
+    fixedname = key$Fixed[key$Variable==v]
+    
+    # select non-baseline values
+    temp = df %>% filter(redcap_event_name!='visit_1_arm_1') %>%
+      .[!is.na(.[[v]]),]
+    # Add baseline values
+    temp = temp %>% left_join(df %>% filter(redcap_event_name=='visit_1_arm_1') %>%
+                                .[!is.na(.[[v]]),] %>%
+                                select(Sample,contains(v)) %>%
+                                `names<-`(c("Sample",'Baseline'))) %>%
+      filter(!is.na(Baseline))
+      # temp = df
+    f = paste0(v,' ~ months_last_visit + Baseline + (months_last_visit|Sample)')
+    lmertest = mix_model(temp,
+                         f=f,
+                         name = v,fix_name_y = fixedname,fix_name_x = 'Months Followup')
+    
+    # Save stats
+    stats = lmertest$stats %>%
+      mutate(comp_symm = lmertest$comp_sym$`p-value`[2])
+    stats.multi = stats.multi %>% rbind(stats)
+    # Arrange plots
+    p1 = ggarrange(plotlist = list(lmertest$SC,lmertest$RES),nrow = 1, widths = c(3,1.3))
+    p2 = ggarrange(plotlist = list(lmertest$QQ,lmertest$QQ_int,lmertest$QQ_slope),ncol=3)
+    p3 = ggarrange(plotlist = list(p1,p2),nrow = 2)
+    plots.multi = append(plots.multi,list(p3))
+    names(plots.multi)[length(plots.multi)] = fixedname
+}
+
+stats.multi = stats.multi %>% 
+  group_by(Variable) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+```
+
+```{r Run without transforming data}
+# No data transformations or normalization - this is done just to get the estimated change in raw scores per unit time.
+
+# This calculates the average change over time per variable, taking multiple measurements into account using mixed models.
+to_test = names(df0)[str_detect(names(df0),'mds.') | str_detect(names(df0),'levo')]
+
+stats.multi.notrans = tibble()
+plots.multi.notrans = list()
+for(v in vars){
+    # v = to_test[1]
+
+    fixedname = key$Fixed[key$Variable==v]
+    
+    # select non-baseline values
+    temp = df0 %>% filter(redcap_event_name!='visit_1_arm_1') %>%
+      .[!is.na(.[[v]]),]
+    # Add baseline values
+    temp = temp %>% left_join(df0 %>% filter(redcap_event_name=='visit_1_arm_1') %>%
+                                .[!is.na(.[[v]]),] %>%
+                                select(Sample,contains(v)) %>%
+                                `names<-`(c("Sample",'Baseline'))) %>%
+      filter(!is.na(Baseline))
+      # temp = df0
+    f = paste0(v,' ~ months_last_visit + Baseline + (months_last_visit|Sample)')
+    lmertest = mix_model(temp,
+                         f=f,
+                         name = v,fix_name_y = fixedname,fix_name_x = 'Months Followup')
+    
+    # Save stats
+    stats = lmertest$stats %>%
+      mutate(comp_symm = lmertest$comp_sym$`p-value`[2])
+    stats.multi.notrans = stats.multi.notrans %>% rbind(stats)
+    # Arrange plots
+    p1 = ggarrange(plotlist = list(lmertest$SC,lmertest$RES),nrow = 1, widths = c(3,1.3))
+    p2 = ggarrange(plotlist = list(lmertest$QQ,lmertest$QQ_int,lmertest$QQ_slope),ncol=3)
+    p3 = ggarrange(plotlist = list(p1,p2),nrow = 2)
+    plots.multi.notrans = append(plots.multi.notrans,list(p3))
+    names(plots.multi.notrans)[length(plots.multi.notrans)] = fixedname
+}
+
+stats.multi.notrans = stats.multi.notrans %>% 
+  group_by(Variable) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+```
+
+```{r Symmetry}
+# Symmetry
+# For all nonzero MDS3 components with R and L elements, the values below denote the asymmetry of the person's symptoms.
+symm = read.csv('C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Reference Files/Curated MDS-UPDRS Part III/Symmetry of UPDRS3 Symptoms.csv') %>% 
+  select(Sample,symmetric)
+df = df %>% left_join(symm)
+
+# This calculates the average change over time per variable, taking multiple measurements into account using mixed models.
+to_test = names(df)[str_detect(names(df),'mds.') | str_detect(names(df),'levo')]
+
+stats.multi.symm = tibble()
+plots.multi.symm = list()
+for(v in vars){
+  for(s in c('Symmetric','Asymmetric')){
+  # v = to_test[2]
+
+    fixedname = key$Fixed[key$Variable==v]
+    temp = df %>% filter(symmetric==s)
+    f = paste0(v,' ~ months_last_visit + (months_last_visit|Sample)')
+    lmertest = mix_model(temp,
+                         f=f,
+                         name = v,fix_name_y = fixedname,fix_name_x = 'Months Followup')
+    
+    # Save stats
+    stats = lmertest$stats %>%
+      mutate(comp_symm = lmertest$comp_sym$`p-value`[2]) %>% 
+      mutate(Symmetry = s,.before='Test')
+    stats.multi.symm = stats.multi.symm %>% rbind(stats)
+    # Arrange plots
+    p1 = ggarrange(plotlist = list(lmertest$SC,lmertest$RES),nrow = 1, widths = c(3,1.3))
+    p2 = ggarrange(plotlist = list(lmertest$QQ,lmertest$QQ_int,lmertest$QQ_slope),ncol=3)
+    p3 = ggarrange(plotlist = list(p1,p2),nrow = 2)
+    plots.multi.symm = append(plots.multi.symm,list(p3))
+    names(plots.multi.symm)[length(plots.multi.symm)] = paste0(fixedname,' - ',s) 
+  }
+}
+
+stats.multi.symm = stats.multi.symm %>% 
+  group_by(Variable,Symmetry) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+```
+
+```{r Symmetry No Transformations}
+# Symmetry
+# For all nonzero MDS3 components with R and L elements, the values below denote the asymmetry of the person's symptoms.
+symm = read.csv('C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Reference Files/Curated MDS-UPDRS Part III/Symmetry of UPDRS3 Symptoms.csv') %>% 
+  select(Sample,symmetric)
+df0 = df0 %>% left_join(symm)
+
+# This calculates the average change over time per variable, taking multiple measurements into account using mixed models.
+to_test = names(df0)[str_detect(names(df0),'mds.') | str_detect(names(df0),'levo')]
+
+stats.multi.symm.notrans = tibble()
+plots.multi.symm.notrans = list()
+for(v in vars){
+  for(s in c('Symmetric','Asymmetric')){
+  # v = to_test[2]
+
+    fixedname = key$Fixed[key$Variable==v]
+    temp = df0 %>% filter(symmetric==s)
+    f = paste0(v,' ~ months_last_visit + (months_last_visit|Sample)')
+    lmertest = mix_model(temp,
+                         f=f,
+                         name = v,fix_name_y = fixedname,fix_name_x = 'Months Followup')
+    
+    # Save stats
+    stats = lmertest$stats %>%
+      mutate(comp_symm = lmertest$comp_sym$`p-value`[2]) %>% 
+      mutate(Symmetry = s,.before='Test')
+    stats.multi.symm.notrans = stats.multi.symm.notrans %>% rbind(stats)
+    # Arrange plots
+    p1 = ggarrange(plotlist = list(lmertest$SC,lmertest$RES),nrow = 1, widths = c(3,1.3))
+    p2 = ggarrange(plotlist = list(lmertest$QQ,lmertest$QQ_int,lmertest$QQ_slope),ncol=3)
+    p3 = ggarrange(plotlist = list(p1,p2),nrow = 2)
+    plots.multi.symm.notrans = append(plots.multi.symm.notrans,list(p3))
+    names(plots.multi.symm.notrans)[length(plots.multi.symm.notrans)] = paste0(fixedname,' - ',s) 
+  }
+}
+
+stats.multi.symm.notrans = stats.multi.symm.notrans %>% 
+  group_by(Variable,Symmetry) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+```
+
+```{r Supplementary Data}
+library(gridExtra)
+library(cowplot)
+
+# Longitudinal Plots
+names = names(plots.multi)
+pu2 = plots.multi
+for(i in 1:length(pu2)){
+  # i=1
+  pu2[[i]] = plot_grid(pu2[[i]]) +
+    theme(plot.margin = margin(1,0.1,0.1,0, "cm")) +
+    draw_label(label=names[i],x=0.5,y=1.03, size = 16, hjust = 0.5)
+}
+
+ml <- marrangeGrob(pu2, nrow=1, ncol=1)
+ggsave(paste0('../Results/Supplementary Data/Validation of Statistical Tests/Table S5 - Progression Rates.pdf'), ml,height=8, width = 12)
+
+# Statistics
+L = full_join(stats.multi %>% filter(str_detect(Variable,'months_last_visit')) %>% mutate(Symmetry = 'All'),
+         stats.multi.symm %>% filter(str_detect(Variable,'months_last_visit'))) %>% 
+  left_join(key %>% rename(Test=Variable)) %>%
+  select(Symmetry,Fixed,everything()) %>% 
+  select(-Test) %>% 
+  rename(Test = Fixed) %>% 
+  arrange(Test) %>% 
+  mutate(`Normalized Rate (95% CI)` = paste(signif(12*Estimate,2),'\n(',signif(12*conf_low,2),'-',signif(12*conf_high,2),')',sep=''))
+
+L.notrans = full_join(stats.multi.notrans %>% filter(str_detect(Variable,'months_last_visit')) %>% mutate(Symmetry = 'All'),
+         stats.multi.symm.notrans %>% filter(str_detect(Variable,'months_last_visit'))) %>% 
+  left_join(key %>% rename(Test=Variable)) %>%
+  select(Symmetry,Fixed,everything()) %>% 
+  select(-Test) %>% 
+  rename(Test = Fixed) %>% 
+  arrange(Test) %>% 
+  mutate(`Change/Year (95% CI)` = paste(signif(12*Estimate,2),'\n(',signif(12*conf_low,2),'-',signif(12*conf_high,2),')',sep='')) %>% 
+  select(Symmetry,Test,`Change/Year (95% CI)`)
+
+L = full_join(L.notrans,L) %>% 
+  select(Symmetry,Test,`Change/Year (95% CI)`,`Normalized Rate (95% CI)`,everything())
+
+L.out = L %>% select(Symmetry,Test,`Change/Year (95% CI)`,`Normalized Rate (95% CI)`,Pval,Padj) %>% 
+  mutate_at(vars(Pval,Padj),function(x) ifelse(x<0.001,'<0.001',signif(x,2)))
+```
+
+```{r All Participants}
+df1 = df0 %>% 
+  pivot_longer(cols = -c(Sample,redcap_event_name), names_to = 'Variable', values_to = 'value') %>% 
+  filter(!is.na(value)) %>% 
+  group_by(redcap_event_name,Variable) %>% 
+  summarise(Mean = mean(value),
+            SD = sd(value)) %>% 
+  mutate(value = paste(round(Mean,1),' (',round(SD,1),')',sep='')) %>% 
+  select(-Mean,-SD) %>% 
+  pivot_wider(names_from = Variable, values_from = value) %>% 
+  select(redcap_event_name,months_last_visit, contains('mds'), levo.eq.dose) %>% 
+  mutate(redcap_event_name = paste('Visit',str_sub(redcap_event_name,7,7)))
+df1
+```
+
+```{r Divide into Progression tertiles}
+# This gives an estimate of progression for each person, calculated by taking the slope of mds4.total~months_last_visit.
+# mds4.total is the MDS-UPDRS Part 4 score at a given timepoint.
+long_est = long0 %>% group_by(Sample) %>% 
+  filter(!is.na(mds4.total), !is.na(months_last_visit)) %>% 
+  group_modify(~summary(glm(.$mds4.total~.$months_last_visit))$coefficients %>% 
+                 as.data.frame %>% rownames_to_column('Variable') %>% 
+                 filter(Variable != '(Intercept)')) %>% 
+  ungroup() %>% mutate(Variable = str_remove(Variable,'[.][$]')) %>% 
+  # Stratify into tertiles based on the progression estimates
+  mutate(Progression = ifelse(Estimate<=quantile(.$Estimate,1/3),'Slow',
+                              ifelse(Estimate>quantile(.$Estimate,2/3),'Fast','Med'))) %>% 
+  mutate(Progression = factor(Progression, levels = c('Slow','Med','Fast')))
+```
+
+```{r Average Progression Per Group}
+avg_prog = tibble()
+for (v in vars){
+  # v=vars[1]
+  # mds.total is the Total MDS-UPDRS score at a given timepoint.
+  temp = long0 %>% group_by(Sample) %>% 
+    filter(!is.na(!!sym(v)), !is.na(months_last_visit)) %>% 
+    group_modify(~summary(glm(.[[v]]~.$months_last_visit))$coefficients %>% 
+                   as.data.frame %>% rownames_to_column('Variable') %>% 
+                   filter(Variable != '(Intercept)')) %>% 
+    ungroup() %>% mutate(Variable = str_remove(Variable,'[.][$]')) %>% 
+    left_join(long_est %>% select(Sample,Progression)) %>% 
+    group_by(Progression) %>% 
+    mutate(Estimate = 12*Estimate) %>% # change per year instead of month
+    summarize(Mean = mean(Estimate), SD = sd(Estimate), n = n()) %>% 
+    # mutate(value = paste(round(Mean,1),' (',round(SD,1),')',sep='')) %>% 
+    mutate(SE = SD/sqrt(n)) %>% 
+    mutate(value_95 = paste(signif(Mean,2),' (',signif(Mean-(1.96*SE),2),', ',signif(Mean+(1.96*SE),2),')',sep='')) %>% 
+    select(-Mean,-SD,-SE,-n) %>% 
+    mutate(Variable = v)
+  avg_prog = rbind(avg_prog,temp)
+}
+
+avg2 = avg_prog %>% 
+  pivot_wider(names_from = Variable, values_from = value_95) %>% 
+  filter(!is.na(Progression)) %>% 
+    rename(`mds1.total` = mds1.total,
+         `mds2.total` = mds2.total, `mds3.total` = mds3.total,
+         `mds4.total` = mds4.total, `levo.eq.dose` = levo.eq.dose)
+
+# Without binning
+avg_prog = tibble()
+for (v in vars){
+  # v=vars[1]
+  # mds.total is the Total MDS-UPDRS score at a given timepoint.
+  temp = long0 %>% group_by(Sample) %>% 
+    filter(!is.na(!!sym(v)), !is.na(months_last_visit)) %>% 
+    group_modify(~summary(glm(.[[v]]~.$months_last_visit))$coefficients %>% 
+                   as.data.frame %>% rownames_to_column('Variable') %>% 
+                   filter(Variable != '(Intercept)')) %>% 
+    ungroup() %>% mutate(Variable = str_remove(Variable,'[.][$]')) %>% 
+    left_join(long_est %>% select(Sample,Progression)) %>% 
+    # group_by(Progression) %>% 
+    mutate(Estimate = 12*Estimate) %>% # change per year instead of month
+    summarize(Mean = mean(Estimate), SD = sd(Estimate), n = n()) %>% 
+    # mutate(value = paste(round(Mean,1),' (',round(SD,1),')',sep='')) %>% 
+    mutate(SE = SD/sqrt(n)) %>% 
+    mutate(value_95 = paste(signif(Mean,2),' (',signif(Mean-(1.96*SE),2),', ',signif(Mean+(1.96*SE),2),')',sep='')) %>% 
+    select(-Mean,-SD,-SE,-n) %>% 
+    mutate(Variable = v)
+  avg_prog = rbind(avg_prog,temp)
+}
+
+avg2
+```
+
+# Test for correlation between follow up time and baseline 
+People with less severe disease may be able to come to more visits.
+
+```{r}
+base = df0 %>% filter(`months_last_visit`==0) %>% select(-`months_last_visit`)
+longest_fu = df0 %>% group_by(Sample) %>% arrange(`months_last_visit`) %>%
+  slice(n()) %>% ungroup %>% select(Sample, `months_last_visit`)
+
+base = base %>% left_join(longest_fu) %>% 
+  pivot_longer(cols = c(contains('mds'),'levo.eq.dose'), 
+               names_to = 'Variable', values_to = 'Value') %>% 
+  filter(!is.na(Value))
+
+stats = base %>% group_by(Variable) %>% 
+  group_modify(~cor.test(~.$Value+.$`months_last_visit`, method = 'spearman',cor.coef.name='rho', data=.) %>% broom::tidy()) %>% ungroup %>% 
+  mutate(qval = p.adjust(p.value, method='BH'),.after='p.value') %>% 
+  rename(rho = estimate)
+
+base %>% 
+  ggplot(aes(Value,`months_last_visit`)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=18) +
+  geom_text(aes(x=0,y=80,label=paste0('rho=',round(rho,2),', q=',round(qval,2))),
+            data = stats, size = 4.5,lineheight=0.8,hjust=0) +
+  facet_wrap('Variable',scale='free') + 
+  xlab('Disease Metric Value') +
+  scale_y_continuous(expand = expansion(mult = 0.1))
+
+ggsave('../Results/Supplementary Figures/Fig. S5 - Baseline Severity vs Total Length of Follow Up.jpeg', height=6,  width=8)
+```
+
+```{r Save statistics}
+writexl::write_xlsx(list('Avg Values Per Visit' = df1,
+                         'Change Per Year & Tertile' = avg2,
+                         'Prog Rates (Table S5)' = L,
+                         'Baseline vs Total Follow-up' = stats),
+                    '../Results/Supplementary Data/Progression/0. Progression of Disease Severity and Medication.xlsx')
+
+writexl::write_xlsx(L.out,'C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Metcalfe-Roach_PD_Micro_2024/Results/Tables/Table S5 - Progression Rates.xlsx')
+```
+
+####
+
+
+

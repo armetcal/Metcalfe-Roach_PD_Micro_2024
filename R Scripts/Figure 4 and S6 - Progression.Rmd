@@ -1,0 +1,507 @@
+---
+title: "Figure 4 - Progression"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(lme4)
+library(lmerTest)
+library(scales)
+library(cowplot)
+
+source('C:/Users/armetcal/OneDrive - UBC/Grad School/CODES/R Functions/Linear Regression and Mixed Models with Assumption Testing.R')
+```
+
+# LONGITUDINAL ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+```{r Species data}
+# Prepare the data ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# We will combine our longitudinal dataset with our taxonomy data, where only the microbes of interest are included.
+
+# Variables to test
+vars = c('mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')
+
+# Load taxonomic data, CLR transform
+ps = readRDS('../Reference Files/taxonomy_phyloseq.rds') %>% microbiome::transform('clr')
+
+# Load sig taxa
+# Multivar
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx',sheet='Species') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the species to test
+# Include F. prausnitzii because of its strong association with 
+#  most Ctrl-associated pathways (Table 2)
+sig = c(temp2[['Species']],'s__Faecalibacterium_prausnitzii') %>% unique
+# sig = c(temp2[['Species']],'s__Faecalibacterium_prausnitzii')
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth,OTU,Abundance,Kingdom:Species) %>% unique
+```
+
+```{r MetaCyc}
+# MetaCyc Data - CLR transformed
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["pwy"]] %>% microbiome::transform('clr')
+
+# Load sig pwy
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='multivar') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the pathways to test
+sig = temp2[['Species']]
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm2 = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Sample,Status,Sex,laxatives,depth,Disease.duration,OTU,Abundance,Species) %>% unique
+```
+
+```{r Combine into one dataset}
+psm = psm %>% mutate(Dataset='Taxonomy',.before='Sample') %>% 
+  full_join(psm2 %>% mutate(Dataset='Pathway',.before='Sample')) %>% 
+  filter(Status=='PD')
+sig = unique(psm$Species)
+```
+
+```{r Load long data, test for normality}
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>%
+  select(Sample,redcap_event_name,months_last_visit,all_of(vars)) %>%
+  filter(Sample %in% psm$Sample)
+
+key = tibble(Variable = c("mds1.total","mds2.total","mds3.total",
+                          "mds4.total","levo.eq.dose"),
+             Fixed = c('MDS-UPDRS 1','MDS-UPDRS 2','MDS-UPDRS 3','MDS-UPDRS 4',
+                       'Levodopa\nEq. Dose'))
+
+temp = long0 %>% filter(redcap_event_name!='visit_1_arm_1') %>%  # This is baseline
+  pivot_longer(cols = all_of(c(vars)), names_to = 'Variable',values_to = 'value') %>% 
+  left_join(key)
+
+m1 = temp %>% ggplot(aes(value)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('Severity Score') + ylab('Density') +
+  facet_wrap('Fixed',scales = 'free')
+m1
+
+# add_pseudocount = function(vector){
+#   pseudo = min(vector[vector!=0], na.rm=T)
+#   return(vector + (pseudo/2))
+# }
+
+temp2 = long0 %>% 
+  filter(redcap_event_name!='visit_1_arm_1') %>%  # This is baseline
+  mutate(mds1.total = mds1.total %>% sqrt(),
+         mds2.total = mds2.total %>% sqrt(),
+         mds3.total = mds3.total %>% sqrt(),
+         mds4.total = mds4.total %>% sqrt(),
+         levo.eq.dose = levo.eq.dose %>% sqrt()) %>% 
+  pivot_longer(cols = all_of(c(vars)), names_to = 'Variable',values_to = 'value') %>% 
+  left_join(key)
+
+m11 = temp2 %>% ggplot(aes(value)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('Severity Score ^ 1/2') + ylab('Density') +
+  facet_wrap('Fixed', scales = 'free')
+m1;m11
+
+ggarrange(plotlist = list(m1,m11),ncol=1)
+
+ggsave("../Results/Supplementary Data/Validation of Statistical Tests/Figure 4 - Progression Normality.pdf",height=11, width=8.5)
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Normalize the variables
+long0 = long0 %>% 
+  mutate(across(c(vars,'months_last_visit'), sqrt))
+```
+
+```{r}
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+long = long0 %>% left_join(psm, multiple='all')
+
+# Center static predictors, normalize where necessary.
+# This reduces spurious correlations as explained in LMER documentation.
+# Center each OTU separately.
+pd = long %>% filter(Status == 'PD') %>% group_by(OTU) %>% 
+  # Rescale to range of 0-1
+  mutate(Abundance = rescale(Abundance)) %>% 
+  # Center around 0
+  mutate(Abundance = Abundance-mean(Abundance,na.rm=T)) %>% ungroup()
+
+# Rescale variables to 0-1
+pd = pd %>% mutate(across(c('months_last_visit',vars,'depth'),rescale))
+# 
+# # Center scale
+pd = pd %>% mutate(across(c('months_last_visit',vars,'depth'),
+                          function(x) x - mean(x,na.rm=T)))
+```
+
+## 'Multivar' model that controls for relevant microbial and non-microbial variables
+
+```{r}
+stats.multi = tibble()
+plots.multi = list()
+for(v in vars){
+  # v = vars[4]
+  for(s in sig){
+     # s = sig[1]; v = vars[1]
+    temp = pd %>% filter(Species == s) %>% 
+      .[!is.na(.[[v]]),]
+    newname = key$Fixed[which(key$Variable==v)]
+    
+    f=paste0(v,' ~ months_last_visit*Abundance + laxatives + Sex + depth + (months_last_visit|Sample)')
+    lmertest = mix_model(temp,
+                         f=f,
+                         name = v,fix_name_y = newname,fix_name_x = 'Months Followup')
+    
+    # Save stats
+    feature = str_split(s,':') %>% .[[1]] %>% .[1]
+    stats = lmertest$stats %>% mutate(Feature = s,.before=Test) %>% 
+      mutate(comp_symm = lmertest$comp_sym$`p-value`[2])
+    stats.multi = stats.multi %>% rbind(stats)
+    # Arrange plots
+    p1 = ggarrange(plotlist = list(lmertest$SC,lmertest$RES),nrow = 1, widths = c(3,1.3))
+    p2 = ggarrange(plotlist = list(lmertest$QQ,lmertest$QQ_int,lmertest$QQ_slope),ncol=3)
+    p3 = ggarrange(plotlist = list(p1,p2),nrow = 2)
+    plots.multi = append(plots.multi,list(p3))
+    names(plots.multi)[length(plots.multi)] = paste0(feature,'_',newname)
+  }
+}
+
+stats.multi.filt = stats.multi %>% filter(str_detect(Variable,'months_last_visit:Abundance')) %>%
+  mutate(Dataset = ifelse(str_detect(Feature,'s__'),'Taxonomy','Pathway')) %>% 
+  group_by(Test,Dataset) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+mm_sig = stats.multi.filt %>% filter(Padj<0.05) %>% pull(Feature)
+```
+
+```{r Symmetry}
+# Symmetry
+# For all nonzero MDS3 components with R and L elements, the values below denote the asymmetry of the person's symptoms.
+symm = read.csv('C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Reference Files/Curated MDS-UPDRS Part III/Symmetry of UPDRS3 Symptoms.csv') %>% 
+  select(Sample,symmetric)
+pd = pd %>% left_join(symm)
+
+stats.multi.symm = tibble()
+plots.multi.symm = list()
+for(symm in c('Symmetric','Asymmetric')){
+  for(v in 'mds4.total'){
+    # v = vars[4]; symm='Symmetric'
+    for(s in mm_sig){
+       # s = sig[1]; v = vars[3]; symm='Symmetric'
+      temp0 = pd %>% filter(Species == s, symmetric==symm) %>% 
+        .[!is.na(.[[v]]),]
+      newname = key$Fixed[which(key$Variable==v)]
+
+      temp = temp0
+      f=paste0(v,' ~ months_last_visit*Abundance + (months_last_visit|Sample)')
+      lmertest = mix_model(temp,
+                           f=f,
+                           name = v,fix_name_y = newname,fix_name_x = 'Months Followup', sphericity = F)
+      
+      # Save stats
+      feature = str_split(s,':') %>% .[[1]] %>% .[1]
+      stats = lmertest$stats %>% mutate(Symmetry = symm,Feature = s,.before=Test)
+      stats.multi.symm = stats.multi.symm %>% rbind(stats)
+      # Arrange plots
+      p1 = ggarrange(plotlist = list(lmertest$SC,lmertest$RES),nrow = 1, widths = c(3,1.3))
+      p2 = ggarrange(plotlist = list(lmertest$QQ,lmertest$QQ_int,lmertest$QQ_slope),ncol=3)
+      p3 = ggarrange(plotlist = list(p1,p2),nrow = 2)
+      plots.multi.symm = append(plots.multi.symm,list(p3))
+      names(plots.multi.symm)[length(plots.multi.symm)] = paste0(feature,'_',newname,' (',symm,')')
+    }
+  }
+}
+
+
+stats.multi.filt.symm = stats.multi.symm %>% filter(str_detect(Variable,'months_last_visit:Abundance')) %>%
+  mutate(Dataset = ifelse(str_detect(Feature,'s__'),'Taxonomy','Pathway')) %>% 
+  group_by(Test,Dataset,Symmetry) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+```
+
+## Plot
+
+```{r All}
+tempstats.multi = stats.multi %>% filter(Variable=='months_last_visit:Abundance') %>% 
+  mutate(Dataset = ifelse(str_detect(Feature,'s__'),'Taxonomy','Pathway')) %>%
+  mutate(Feature = str_replace(Feature, '[&]beta;-D','B-D')) %>% 
+  mutate(Feature = str_wrap(Feature,40)) %>% 
+  group_by(Test,Dataset) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup %>% 
+  mutate(Qval = ifelse(Padj>0.05,'',
+                       ifelse(Padj>0.01,'*',
+                              ifelse(Padj>0.001,'**',
+                                     ifelse(Padj<=0.001,'***','')))))
+
+# Edit levels for plotting
+tempstats.multi$Test[tempstats.multi$Test=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+tempstats.multi$Test[tempstats.multi$Test=='mds1.total'] = 'MDS-UPDRS 1'
+tempstats.multi$Test[tempstats.multi$Test=='mds2.total'] = 'MDS-UPDRS 2'
+tempstats.multi$Test[tempstats.multi$Test=='mds3.total'] = 'MDS-UPDRS 3'
+tempstats.multi$Test[tempstats.multi$Test=='mds4.total'] = 'MDS-UPDRS 4'
+tempstats.multi$Feature = str_remove_all(tempstats.multi$Feature,'s__') %>% str_replace_all('_',' ')
+
+# Arrange data
+order_species = tempstats.multi %>% filter(Test=='Levodopa\nEq. Dose') %>% arrange(`Estimate`)
+tempstats.multi$Feature = factor(tempstats.multi$Feature, levels = order_species$Feature)
+
+tempstats.multi$Test = factor(tempstats.multi$Test,levels = c('Levodopa\nEq. Dose','MDS-UPDRS 1','MDS-UPDRS 2','MDS-UPDRS 3','MDS-UPDRS 4'))
+tempstats.multi = tempstats.multi %>% droplevels() %>% as.data.frame() %>% filter(!is.na(Variable))
+
+plot_a = tempstats.multi %>% filter(Dataset=='Taxonomy') %>% 
+  ggplot(aes(Test,Feature,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25)
+
+plot_b = tempstats.multi %>% filter(Dataset=='Pathway') %>% 
+  ggplot(aes(Test,Feature,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.25)
+plot_a;plot_b
+```
+
+```{r Symmetry}
+tempstats.multi.symm = stats.multi.symm %>% filter(Variable=='months_last_visit:Abundance') %>% 
+  mutate(Dataset = ifelse(str_detect(Feature,'s__'),'Taxonomy','Pathway')) %>%
+  mutate(Feature = str_replace(Feature, '[&]beta;-D','B-D')) %>% 
+  mutate(Feature = str_wrap(Feature,40)) %>% 
+  group_by(Test,Dataset) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup %>% 
+  mutate(Qval = ifelse(Padj>0.05,'',
+                       ifelse(Padj>0.01,'*',
+                              ifelse(Padj>0.001,'**',
+                                     ifelse(Padj<=0.001,'***','')))))
+
+# Edit levels for plotting
+tempstats.multi.symm$Test[tempstats.multi.symm$Test=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+tempstats.multi.symm$Test[tempstats.multi.symm$Test=='mds1.total'] = 'MDS-UPDRS 1'
+tempstats.multi.symm$Test[tempstats.multi.symm$Test=='mds2.total'] = 'MDS-UPDRS 2'
+tempstats.multi.symm$Test[tempstats.multi.symm$Test=='mds3.total'] = 'MDS-UPDRS 3'
+tempstats.multi.symm$Test[tempstats.multi.symm$Test=='mds4.total'] = 'MDS-UPDRS 4'
+tempstats.multi.symm$Feature = str_remove_all(tempstats.multi.symm$Feature,'s__') %>% str_replace_all('_',' ')
+
+# Arrange data
+tempstats.multi.symm$Feature = factor(tempstats.multi.symm$Feature, levels = order_species$Feature)
+
+tempstats.multi.symm$Test = factor(tempstats.multi.symm$Test,levels = c('Levodopa\nEq. Dose','MDS-UPDRS 1','MDS-UPDRS 2','MDS-UPDRS 3','MDS-UPDRS 4'))
+tempstats.multi.symm = tempstats.multi.symm %>% droplevels() %>% as.data.frame() %>% filter(!is.na(Variable))
+
+plot_b.sym = tempstats.multi.symm %>% filter(Dataset=='Pathway') %>% 
+  ggplot(aes(Symmetry,Feature,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+  geom_text(aes(label=Qval),size = 12, col = 'white',nudge_y = -0.22)
+  plot_b.sym
+```
+
+# BASELINE ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+## Univariate Analysis
+
+```{r, include=FALSE}
+psm_0 = pd %>% filter(redcap_event_name=='visit_1_arm_1') %>% 
+  select(-Dataset,-OTU,-c(Kingdom:Genus))
+dd = psm_0 %>% select(Sample,Disease.duration) %>% unique() %>% filter(!is.na(Disease.duration))
+psm_0 = psm_0 %>% select(-Disease.duration) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(dd)
+
+spearman = correlate_met(psm_0 %>% filter(!is.na(mds1.total)),
+                         'mds1.total',grp=NA) %>% 
+  rbind(correlate_met(psm_0 %>% filter(!is.na(mds2.total)),
+                          'mds2.total',grp=NA)) %>% 
+  rbind(correlate_met(psm_0 %>% filter(!is.na(mds3.total)),
+                          'mds3.total',grp=NA)) %>% 
+  rbind(correlate_met(psm_0 %>% filter(!is.na(mds4.total)),
+                           'mds4.total',grp=NA)) %>% 
+  rbind(correlate_met(psm_0 %>% filter(!is.na(levo.eq.dose)),
+                           'levo.eq.dose',grp=NA))
+
+# Correct P values per species/function group
+spearman = spearman %>% 
+  mutate(group = ifelse(str_detect(taxon,'s__'),'Species','MetaCyc')) %>% 
+  group_by(group,variable) %>% 
+  mutate(Padj = p.adjust(Pval,method='BH')) %>% ungroup()
+```
+
+## Multivariate Analysis
+
+```{r}
+psm_0 = pd %>% filter(redcap_event_name=='visit_1_arm_1') %>% 
+  select(-Dataset,-OTU,-c(Kingdom:Genus))
+dd = psm_0 %>% select(Sample,Disease.duration) %>% unique() %>% filter(!is.na(Disease.duration)) %>% 
+  mutate(Disease.duration = rescale(Disease.duration))
+psm_0 = psm_0 %>% select(-Disease.duration) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) %>% 
+  left_join(dd) %>% 
+  filter(!is.na(Disease.duration))
+
+stats.basem = tibble()
+plots.basem = list()
+for(v in vars){
+  for(s in sig){
+    # s = sig[1]; v = vars[1]
+    newname = key$Fixed[which(key$Variable==v)] # nice name for plots
+    temp = psm_0[!is.na(psm_0[[v]]),] # remove NA values
+    basetest = lin_reg(temp,
+                       paste0(v,'~`',s,'`+laxatives+depth+Sex+Disease.duration'),
+                       name = v,
+                       name_key = key)
+    
+    # Save stats
+    feature = str_split(s,':') %>% .[[1]] %>% .[1]
+    stats.basem = stats.basem %>% rbind(basetest$stats %>% mutate(Feature = s,.before=Test))
+    # Arrange plots
+    p1 = ggarrange(plotlist = list(basetest$SC,basetest$RES,basetest$QQ),nrow = 1)#, widths = c(3,1.3))
+    plots.basem = append(plots.basem,list(p1))
+    names(plots.basem)[length(plots.basem)] = paste0(feature,'_',newname)
+  }
+}
+
+stats.basem2 = stats.basem %>% 
+  mutate(Dataset = ifelse(str_detect(Feature,'s__'),'Taxonomy','Pathway')) %>% 
+  mutate(Variable = str_remove_all(Variable,'`')) %>% 
+  mutate(Feature = str_replace(Feature, '[&]beta;-D','B-D')) %>% 
+  mutate(Var_Type = ifelse(Feature==Variable,'Abundance',Variable)) %>% 
+  group_by(Test, Dataset,Var_Type) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup()
+```
+
+## Multivar Plots
+
+```{r}
+# Edit levels for plottin
+stats.basem2$Test[stats.basem2$Test=='mds1.total'] = 'MDS-UPDRS 1'
+stats.basem2$Test[stats.basem2$Test=='mds2.total'] = 'MDS-UPDRS 2'
+stats.basem2$Test[stats.basem2$Test=='mds3.total'] = 'MDS-UPDRS 3'
+stats.basem2$Test[stats.basem2$Test=='mds4.total'] = 'MDS-UPDRS 4'
+stats.basem2$Test[stats.basem2$Test=='levo.eq.dose'] = 'Levodopa\nEq. Dose'
+stats.basem2$Test[stats.basem2$Test=='bdi_total'] = 'Total BDI'
+stats.basem2$Test[stats.basem2$Test=='fss_total'] = 'Total FSS'
+stats.basem2$Feature = str_remove_all(stats.basem2$Feature,'s__') %>% str_replace_all('_',' ') %>% str_remove_all('`') %>% 
+  str_wrap(40)
+
+stats.basem2$Test = factor(stats.basem2$Test,levels =  c('Levodopa\nEq. Dose','MDS-UPDRS 1','MDS-UPDRS 2','MDS-UPDRS 3','MDS-UPDRS 4','Total BDI','Total FSS'))
+
+# Plot ordering
+stats.basem2$Feature = factor(stats.basem2$Feature, levels = order_species$Feature)
+
+plot_base_a = stats.basem2 %>% filter(Dataset=='Taxonomy',Var_Type=="Abundance") %>% 
+  ggplot(aes(Test,Feature,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar")
+
+plot_base_b = stats.basem2 %>% filter(Dataset=='Pathway',Var_Type=="Abundance") %>% 
+  ggplot(aes(Test,Feature,col=`Estimate`)) +
+  geom_point(size=14) +
+  theme_classic(base_size=18) +
+  ylab(NULL) + xlab(NULL) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  scale_color_gradient2(low="darkblue", high="darkred", guide="colorbar")
+
+plot_base_a;plot_base_b
+```
+
+# COMPILE PLOTS
+
+```{r Figure 4}
+p1 = ggarrange(plotlist = list(NULL,plot_a, NULL,plot_base_a), ncol = 4, widths = c(0.7,4,0.7,4), common.legend = F)
+
+p2 = ggarrange(plotlist = list(plot_b, plot_base_b), ncol = 2, widths = c(4,4), common.legend = F)
+
+plot_grid(p1, p2, ncol = 1, rel_heights = c(1,1))+
+  theme(plot.margin = margin(1,0.1,0.1,0, "cm")) +
+  draw_label(label="A",x=0.03,y=0.98, fontface = "bold", size = 40) +
+  draw_label(label="B",x=0.03,y=0.5, fontface = "bold", size = 40) +
+  draw_label(label="C",x=0.52,y=0.98, fontface = "bold", size = 40) +
+  draw_label(label="D",x=0.52,y=0.5, fontface = "bold", size = 40)
+
+ggsave('../Results/Figures/Figure 4 - Progression.pdf',height = 11, width = 17.5)
+
+ggsave(plot = plot_b.sym,'../Results/Figures/Figure 4.2 - Progression Symmetry.pdf',height = 4, width = 7.5)
+```
+
+```{r Supplementary Data}
+library(gridExtra)
+
+# Longitudinal - Multivariate
+names = names(plots.multi)
+pu2 = plots.multi
+for(i in 1:length(pu2)){
+  # i=1
+  pu2[[i]] = plot_grid(pu2[[i]]) +
+    theme(plot.margin = margin(1,0.1,0.1,0, "cm")) +
+    draw_label(label=names[i],x=0.5,y=1.03, size = 16, hjust = 0.5)
+}
+
+ml <- marrangeGrob(pu2, nrow=1, ncol=1)
+ggsave(paste0('../Results/Supplementary Data/Validation of Statistical Tests/Figure 4 - Long Multivar.pdf'), ml,height=8, width = 12)
+
+# Longitudinal - Symmetry
+names = names(plots.multi.symm)
+pu2 = plots.multi.symm
+for(i in 1:length(pu2)){
+  # i=1
+  pu2[[i]] = plot_grid(pu2[[i]]) +
+    theme(plot.margin = margin(1,0.1,0.1,0, "cm")) +
+    draw_label(label=names[i],x=0.5,y=1.03, size = 16, hjust = 0.5)
+}
+
+ml <- marrangeGrob(pu2, nrow=1, ncol=1)
+ggsave(paste0('../Results/Supplementary Data/Validation of Statistical Tests/Figure 4 - Long Multivar - Symmetry.pdf'), ml,height=8, width = 12)
+
+# Baseline - Multivariate
+names = names(plots.basem)
+pu2 = plots.basem
+for(i in 1:length(pu2)){
+  # i=1
+  pu2[[i]] = plot_grid(pu2[[i]]) +
+    theme(plot.margin = margin(1,0.1,0.1,0, "cm")) +
+    draw_label(label=names[i],x=0.5,y=1.03, size = 16, hjust = 0.5)
+}
+
+ml <- marrangeGrob(pu2, nrow=4, ncol=1)
+ggsave(paste0('../Results/Supplementary Data/Validation of Statistical Tests/Figure 4 - Baseline.pdf'), ml,height=4, width = 11)
+```
+
+# COMPILE STATS
+
+```{r}
+temp = stats.multi %>%
+  mutate(Dataset = ifelse(str_detect(Feature,'s__'),'Taxonomy','Pathway')) %>% 
+  group_by(Test,Dataset,Variable) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup
+
+L = list('Linear Mixed Models' = temp, 'LMM - Symmetry' = stats.multi.filt.symm, 'Baseline Linear Regression' = stats.basem2)
+
+writexl::write_xlsx(L,'C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Metcalfe-Roach_PD_Micro_2024 - Revision/Results/Supplementary Data/0. FIGURE STATISTICS/Figure 4.xlsx')
+```
+

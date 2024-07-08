@@ -1,0 +1,66 @@
+---
+title: "Figure S6"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(phyloseq)
+library(ggpubr)
+library(data.table)
+library(tidyverse)
+
+# This contains all the taxonomic and sample data necessary for cross-sectional analyses.
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds")
+```
+
+```{r}
+bl = ps %>% microbiome::transform('clr') %>% 
+  subset_taxa(Species %in% c('s__Blautia_wexlerae','s__Blautia_obeum')) %>% 
+  psmelt() %>% 
+  dplyr::select(Sample, Abundance, Species) %>% 
+  pivot_wider(names_from = Species, values_from = Abundance) 
+
+only_nonzero = bl %>% filter(s__Blautia_wexlerae>0 & s__Blautia_obeum>0)
+
+p1 = cor.test(~bl$s__Blautia_obeum+bl$s__Blautia_wexlerae, 
+              method = 'spearman',cor.coef.name='rho') %>%
+  broom::tidy() %>% 
+  mutate(Test = 'All Data Points', .before = estimate) %>% 
+  left_join(cor.test(~rank(bl$s__Blautia_obeum)+rank(bl$s__Blautia_wexlerae), 
+              method = 'pearson') %>% broom::tidy() %>% 
+              dplyr::select(estimate,conf.low, conf.high)) %>% 
+  mutate(CI = paste0('(',round(conf.low,2),',',round(conf.high,2),')')) %>% 
+  dplyr::select(Test:estimate,conf.low,conf.high,CI,everything())
+
+p2 = cor.test(~only_nonzero$s__Blautia_obeum+only_nonzero$s__Blautia_wexlerae, 
+              method = 'spearman',cor.coef.name='rho') %>%
+  broom::tidy() %>% 
+  mutate(Test = 'Nonzero Points Only', .before = estimate) %>% 
+  left_join(cor.test(~rank(only_nonzero$s__Blautia_obeum)+rank(only_nonzero$s__Blautia_wexlerae), 
+              method = 'pearson') %>% broom::tidy() %>% 
+              dplyr::select(estimate,conf.low, conf.high)) %>% 
+  mutate(CI = paste0('(',round(conf.low,2),',',round(conf.high,2),')')) %>% 
+  dplyr::select(Test:estimate,conf.low,conf.high,CI,everything())
+
+bl %>% 
+  ggplot(aes(s__Blautia_obeum, s__Blautia_wexlerae)) +
+  geom_point() +
+  geom_smooth(method='lm', col = 'black') +
+  geom_smooth(method='lm', inherit.aes=F, 
+              data = only_nonzero, 
+              aes(s__Blautia_obeum, s__Blautia_wexlerae),
+              col = 'red') +
+  annotate("text", x=2.5, y=0.2, 
+           label = paste0('r=',p1$CI[1],', P<0.001'), 
+           color = "black",size=6) +
+  annotate("text", x=2.5, y=1.2, 
+           label = paste0('r=',p2$CI[1],', P<0.001'), 
+           color = "red",size=6) +
+  theme_classic(base_size = 20)
+
+ggsave("../Results/Supp Figures/Figure S8 - Blautia.pdf", height = 4, width = 4.5)
+
+writexl::write_xlsx(rbind(p1,p2),path = '../Results/Supplementary Data/0. FIGURE STATISTICS/Figure S8.xlsx')
+```

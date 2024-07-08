@@ -1,0 +1,78 @@
+---
+title: "6a. Change in Disease Severity and Medication Over Time"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(lmerTest)
+library(scales)
+
+# Load participant data
+psm = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% 
+  subset_taxa(Species == 's__Blautia_obeum') %>% psmelt() %>%
+  dplyr::select(Sample,Status,Sex,laxatives,depth) %>% unique
+# Load longitudinal metadata
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  dplyr::select(-Disease.duration,-Status)
+
+# Finished longitudinal dataset. Contains all the visits for each person with n>1 visits,
+# where each individual visit/microbe combination is one row.
+# baseline bristol rating and microbial abundances are static variables.
+long = long0 %>% left_join(psm, multiple='all') %>% 
+  filter(Status=='PD')
+
+# Variables to test
+vars = c('hy','mds.total','mds1.total','mds2.total','mds3.total','mds4.total','levo.eq.dose')
+
+df = long %>% dplyr::select(Sample,redcap_event_name,months_last_visit,clinstate,all_of(vars)) %>% 
+  rename(Visit = redcap_event_name, `Months in Study` = months_last_visit, `Clinical State` = clinstate,
+         `Hoehn & Yahr` = hy,
+         `Total MDS-UPDRS` = mds.total, `MDS-UPDRS 1` = mds1.total,
+         `MDS-UPDRS 2` = mds2.total, `MDS-UPDRS 3` = mds3.total,
+         `MDS-UPDRS 4` = mds4.total, `Levodopa\nEq. Dose` = levo.eq.dose)
+```
+# Test for correlation between follow up time and baseline 
+People with less severe disease may be able to come to more visits.
+
+```{r}
+base = df %>% filter(`Months in Study`==0) %>% dplyr::select(-`Months in Study`)
+longest_fu = df %>% group_by(Sample) %>% arrange(`Months in Study`) %>%
+  slice(n()) %>% ungroup %>% dplyr::select(Sample, `Months in Study`)
+
+base = base %>% left_join(longest_fu) %>% 
+  pivot_longer(cols = c(contains('UPDRS'),'Levodopa\nEq. Dose'), names_to = 'Variable', values_to = 'Value') %>% 
+  filter(Variable!='Total MDS-UPDRS')
+
+stats = base %>% group_by(Variable) %>% 
+  group_modify(~cor.test(~.$Value+.$`Months in Study`, method = 'spearman',cor.coef.name='rho', data=.) %>% broom::tidy()) %>% ungroup %>% 
+  mutate(qval = p.adjust(p.value, method='BH'),.after='p.value') %>% 
+  rename(rho = estimate) %>% filter(Variable!='Total MDS-UPDRS') %>% droplevels() %>% 
+  left_join(base %>% group_by(Variable) %>% 
+              group_modify(~cor.test(~rank(.$Value)+rank(.$`Months in Study`), 
+                                     method = 'pearson', data=.) %>% broom::tidy()) %>% ungroup %>% 
+              dplyr::select(Variable,conf.low,conf.high)) %>% 
+  mutate(CI = paste0('(',round(conf.low,2),',',round(conf.high,2),')')) %>% 
+  dplyr::select(Variable:rho,conf.low,conf.high,CI,everything())
+
+base %>% filter(Variable!='Total MDS-UPDRS') %>% droplevels() %>% 
+  ggplot(aes(Value,`Months in Study`)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=18) +
+  geom_text(aes(x=0,y=80,label=paste0('r=',CI,'\nPadj=',round(qval,2))),
+            data = stats, size = 4.5,lineheight=1,hjust=0) +
+  facet_wrap('Variable',scale='free_x') +
+  xlab('Disease Metric Value') +
+  scale_y_continuous(expand = expansion(mult = 0.2))
+
+ggsave('../Results/Supp Figures/Figure S4 - Baseline vs Study Length.pdf', height=6,  width=8)
+
+writexl::write_xlsx(stats %>% rename(estimate = rho),
+                    '../Results/Supplementary Data/0. FIGURE STATISTICS/Figure S4.xlsx')
+```

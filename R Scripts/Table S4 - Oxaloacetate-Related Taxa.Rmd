@@ -1,0 +1,33 @@
+---
+title: "4b. Microbes Important for DA Pathways"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(readxl)
+
+# Load all EC terms, filter to only include EC term of interest
+ec = read_rds('../Reference Files/functional_phyloseq_ec_stratified.rds') %>% 
+  subset_taxa(feature == '4.1.1.32-RXN: NO_NAME') %>% psmelt() %>% 
+  group_by(Sample) %>% 
+  mutate(sum = sum(Abundance)) %>% 
+  # Remove anyone with zero abundance, as they're not informative
+  filter(sum > 0) %>% 
+  mutate(pctab = round(100*Abundance/sum,2)) %>% ungroup
+
+ecstat = ec %>% group_by(taxon) %>% 
+  summarize(Min = min(pctab),
+            Max = max(pctab),
+            Median = median(pctab),
+            IQR = IQR(pctab)) %>% 
+  mutate(taxon =sapply(.$taxon,function(x) str_split(x,'[.]') %>% .[[1]] %>% .[2])) %>% 
+  mutate(taxon = ifelse(is.na(taxon),'Unclassified',taxon)) %>% 
+  arrange(-Max) %>% arrange(-IQR) %>% 
+  rename(Taxon = taxon)
+
+writexl::write_xlsx(ecstat,'../Results/Tables/Table S4 - Oxaloacetate-Related Taxa.xlsx')
+```
+

@@ -17,6 +17,8 @@ library(ggpubr)
 source("999. Differential Abundance Functions.R")
 # This contains all the taxonomic and sample data necessary for cross-sectional analyses.
 ps = readRDS("../Reference Files/taxonomy_phyloseq.rds")
+ps@sam_data$depth = log2(ps@sam_data$depth)
+ps@sam_data$laxatives = factor(ps@sam_data$laxatives)
 
 # Prep phyloseq objects
 p = ps %>% tax_glom('Phylum')
@@ -255,7 +257,6 @@ L.out = L %>% lapply(function(x){
   return(out)
 })
 ```
-
 
 # SAVE RESULTS
 

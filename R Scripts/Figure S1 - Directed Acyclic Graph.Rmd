@@ -1,0 +1,69 @@
+---
+title: "Covariables - Directed Acyclic Graph"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(ggdag)
+library(ggplot2)
+theme_set(theme_dag())
+```
+
+```{r Part 1 - Microbiome and PD}
+smoking_ca_dag <- dagify(Microbes ~ Laxatives + SeqDepth + Sex,
+                        PDStatus ~ Microbes + Sex,
+                        Laxatives ~ Constipation,
+                        Bristol ~ Laxatives + Constipation,
+                        Constipation ~ PDStatus,
+  labels = c(
+    "Microbes" = "Microbes",
+    "Laxatives" = "Laxatives",
+    "SeqDepth" = "Seq\nDepth",
+    "PDStatus" = "PD Status",
+    "Sex" = "Sex",
+    "Constipation"="Constipation",
+    "Bristol" = "Bristol"
+    # "Age" = "Age",
+    # 'AgeOnset' = 'Age of\nPD Onset'
+  ),
+  # latent = "FFQ\nRelevance",
+  exposure = "Microbes",
+  outcome = "PDStatus"
+)
+
+ggdag(smoking_ca_dag, text = FALSE, use_labels = "label")
+ggsave('../Results/Supp Figures/Figure 0 - Main DAG.pdf')
+```
+
+```{r Part 1 - Metabolites and PD}
+smoking_ca_dag <- dagify(Microbes ~ Laxatives + SeqDepth + Sex,
+                        PDStatus ~ Microbes + Sex + brainbody,
+                        Laxatives ~ Constipation,
+                        Bristol ~ Laxatives + Constipation,
+                        Constipation ~brainbody,
+                        # Protein ~ Microbes,
+                        Metabolites ~ Bristol + Microbes,
+  labels = c(
+    "Microbes" = "Microbes",
+    "Laxatives" = "Laxatives",
+    "SeqDepth" = "Seq\nDepth",
+    "PDStatus" = "PD Status",
+    "Sex" = "Sex",
+    "Constipation"="Constipation",
+    "Bristol" = "Bristol\nStool\nRating",
+    "Metabolites" = "Proteolytic\nMetabolites",
+    "brainbody" = 'Brain vs Body-First\nPD Mechanisms'
+    # 'Protein' = 'Protein\nDegradation'
+    # "Age" = "Age",
+    # 'AgeOnset' = 'Age of\nPD Onset'
+  ),
+  # latent = "FFQ\nRelevance",
+  exposure = "Metabolites",
+  outcome = "Microbes"
+)
+
+ggdag(smoking_ca_dag, text = FALSE, use_labels = "label")
+ggsave('../Results/Supp Figures/Figure 0 - Main DAG.pdf')
+```

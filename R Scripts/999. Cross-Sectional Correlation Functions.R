@@ -6,25 +6,24 @@
 # var = the variable of interest
 # grp = specify what subset of the total dataset is being tested (all, pd, ctrl, etc)
 correlate_met = function(df,var,grp){
-
     # For every microbe of interest...
     test = apply(df[,sig],2,function(x){
-      ct = cor.test(x,df[[var]],method='spearman') # Spearman correlation
-      # Save statistical values
-      c = ct$p.value
-      rho = ct$estimate
-      return(c(c,rho))
+      ct = cor.test(x,df[[var]],method='spearman') %>% broom::tidy() %>% as.data.frame() 
+      # Extract CI from rank-transformed Pearson tests
+      ci = cor.test(rank(x),rank(df[[var]]),method='pearson') %>% broom::tidy() %>% as.data.frame()
+      ct = cbind(ct,ci[,colnames(ci) %in% c('conf.high','conf.low')]) %>% t() %>% as.data.frame()
+      return(ct)
   }) %>% # Then format the results
-      as.data.frame(row.names = c('pval','rho')) %>% 
+      as.data.frame() %>% `colnames<-`(sig) %>% 
       t() %>% as.data.frame() %>% 
-      # Add test info and correct p values
-      mutate(method = 'spearman',
-             variable = var,
-             group = grp,
-             qval = p.adjust(pval,method='fdr')) %>% 
-      arrange(pval) %>% 
+      `names<-`(c('Estimate','Statistic','Pval','Method','Alternative','Conf High','Conf Low')) %>% 
       rownames_to_column('taxon') %>% 
-      select(group,method,variable,taxon,rho,everything())
+      # Add test info and correct p values
+      mutate(variable = var,
+             group = grp,
+             Padj = p.adjust(.$Pval,method='fdr')) %>% 
+      arrange(Pval) %>% 
+      dplyr::select(group,variable,taxon,Estimate,`Conf Low`,`Conf High`,Pval,Padj,Statistic,everything())
   return(test)
 }
 

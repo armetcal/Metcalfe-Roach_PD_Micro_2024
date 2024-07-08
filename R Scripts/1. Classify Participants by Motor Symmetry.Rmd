@@ -1,0 +1,49 @@
+---
+title: "Revision - classify by subtype using symmetry"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(phyloseq)
+
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds")
+
+long0 = read.csv('../Reference Files/longitudinal_data.csv') %>% 
+  select(Sample,redcap_event_name,months_last_visit,contains('mds3')) %>%
+  filter(Sample %in% sample_names(ps))
+source('C:/Users/armetcal/OneDrive - UBC/Grad School/CODES/R Functions/id_functions.R')
+
+# Load MDS-UPDRS Data
+key = read.csv('C:/Users/armetcal/OneDrive - UBC/Grad School/Data/PD data from Mihai/Reference Files/Format RedCap files/name_keys/fu_name_key.csv')
+long = read.csv('C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Reference Files/Curated MDS-UPDRS Part III/Combined.csv') %>% 
+  mutate(record_id = change_ids_to_longitudinal(.$record_id)) %>% 
+  select(-rneck,-rtremor_2)
+names(long) = sapply(names(long), function(x) ifelse(x %in% key$Varcode,key$key[which(x==key$Varcode)],x))
+long = long %>% rename(Sample = Record.ID)
+
+# Format data
+longfilt = long %>% filter(Sample %in% sample_names(ps)) %>% arrange(redcap_event_name) %>% 
+  group_by(Sample) %>% filter(redcap_event_name == redcap_event_name[1L]) %>% ungroup() %>% 
+  select(-mds.comments,-clinstate,-mds.complete) %>% 
+  pivot_longer(cols = -c(Sample,redcap_event_name), names_to = 'key', values_to = 'value') %>% 
+  left_join(key %>% select(key,symmetry,rightleft)) %>% 
+  filter(rightleft!='') %>% 
+  select(-key) %>% 
+  pivot_wider(names_from = rightleft, values_from = value) %>% 
+  # If they're both zero, we can't assess any differences
+  filter(!(R==0 & L==0)) %>% 
+  group_by(Sample) %>% 
+  summarize(R=mean(R,na.rm=T),L = mean(L,na.rm=T)) %>% 
+  mutate(diff = abs(R-L)) %>% 
+  mutate(symmetric = ifelse(diff>median(.$diff),'Asymmetric','Symmetric'))
+hist(longfilt$diff)  
+```
+
+```{r}
+# For all nonzero MDS3 components with R and L elements, the values below denote the asymmetry of the person's symptoms.
+write.csv(longfilt,'C:/Users/armetcal/OneDrive - UBC/Grad School/Data/HUMAN COHORT/Reference Files/Curated MDS-UPDRS Part III/Symmetry of UPDRS3 Symptoms.csv',row.names = F)
+```
+

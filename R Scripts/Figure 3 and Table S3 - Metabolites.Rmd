@@ -1,0 +1,580 @@
+---
+title: "Figure 3 and Table S1 - Metabolites"
+author: "Avril Metcalfe-Roach"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Prep Data}
+library(phyloseq)
+library(tidyverse)
+library(ggpubr)
+library(microbiome)
+library(ggcorrplot)
+library(scales)
+library(cowplot)
+
+# Significant microbially-derived metabolites from previous paper (serum metabolomics)
+# p-cresol and phenylacetylglutamine
+met = read.csv('../Reference Files/normalized_proteolytic_metabolites.csv')
+
+# Taxonomy Data ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ps = readRDS("../Reference Files/taxonomy_phyloseq.rds") %>% microbiome::transform('clr')
+# Load sig taxa
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/Taxonomy_Multivar_Summary.xlsx',sheet='Species') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the species to test
+# Include F. prausnitzii because of its strong association with 
+#  Ctrl-associated pathways (Table 2)
+psig = readxl::read_xlsx('../Results/Tables/Table 2 - Stratified Hits.xlsx') %>%
+  filter(`Total (%)`>=33) %>% # at least 10% of the functional hits reproduced
+  # mutate(Taxon = sapply(Taxon,function(x) paste0('s__',x) %>% str_replace_all(' ','_'))) %>% 
+  pull(Taxon)
+sig = c(temp2[['Species']],psig) %>% unique
+
+# Select species and melt phyloseq object
+other_levels = colnames(ps@tax_table)[colnames(ps@tax_table) != 'Species']
+psm = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-any_of(other_levels),-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance)
+
+sig.taxa = sig
+
+# MetaCyc Data ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ps = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["pwy"]] %>% microbiome::transform('clr')
+
+# Load sig taxa
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/MetaCyc_Summary.xlsx',sheet='multivar') %>%
+  filter(sig_in_at_least_n==1, Variable=='StatusPD')
+
+# Make a vector of the pathways to test
+sig = temp2[['Species']]
+
+# Select species and melt phyloseq object
+psm2 = ps %>% subset_taxa(Species %in% sig) %>% psmelt() %>%
+  select(Species,everything()) %>% select(-OTU) %>%
+  pivot_wider(names_from = Species, values_from = Abundance)
+
+sig.pwy = sig
+
+# Combine and add metabolites ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+psm = psm %>% full_join(psm2) %>% left_join(met)
+rm(met,other_levels,sig,psig,psm2,temp2,ps)
+```
+
+```{r Test variables for normality}
+# metabolites need to be squared for linear models
+m1 = psm %>% ggplot(aes(pcresol)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('p-Cresol') + ylab('Density')
+m11 = psm %>% ggplot(aes(rescale(pcresol)^2.5)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('p-Cresol^2.5') + ylab('Density')
+
+m2 = psm %>% ggplot(aes(phenylacetylglutamine)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('Phenylacetylglutamine') + ylab('Density') 
+m22 = psm %>% ggplot(aes(rescale(phenylacetylglutamine)^1.5)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('Phenylacetylglutamine^1.5') + ylab('Density')
+
+d1 = psm %>% ggplot(aes(depth)) +
+  geom_density() +
+  theme_classic(base_size=18) +
+  xlab('Sequencing Depth') + ylab('Density') +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+b1 = psm %>% ggplot(aes(round(bristol))) +
+  geom_histogram() +
+  theme_classic(base_size=18) +
+  xlab('Bristol Rating') + ylab('Density')
+
+ggarrange(plotlist = list(d1,b1,m1,m11,m2,m22),
+          ncol = 2,nrow=3)
+
+ggsave("../Results/Supplementary Data/Validation of Statistical Tests/Figure 3 - Variable Normality.pdf",height=10, width=12)
+
+### Update the ps object with normalized data
+psm$norm_pcresol = rescale(psm$pcresol)^2.5
+psm$norm_pag = rescale(psm$phenylacetylglutamine)^1.5
+```
+
+```{r Correlation functions}
+# Spearman correlations
+correlate_met = function(df,var,grp){
+    # For every microbe of interest...
+    test = apply(df[,sig],2,function(x){
+      ct = cor.test(x,df[[var]],method='spearman') %>% broom::tidy() %>% as.data.frame() 
+      # Extract CI from rank-transformed Pearson tests
+      ci = cor.test(rank(x),rank(df[[var]]),method='pearson') %>% broom::tidy() %>% as.data.frame()
+      ct = cbind(ct,ci[,colnames(ci) %in% c('conf.high','conf.low')]) %>% t() %>% as.data.frame()
+      return(ct)
+  }) %>% # Then format the results
+      as.data.frame() %>% `colnames<-`(sig) %>% 
+      t() %>% as.data.frame() %>% 
+      `names<-`(c('Estimate','Statistic','Pval','Method','Alternative','Conf Low','Conf High')) %>% 
+      rownames_to_column('taxon') %>% 
+      # Add test info and correct p values
+      mutate(variable = var,
+             group = grp,
+             Padj = p.adjust(.$Pval,method='fdr')) %>% 
+      arrange(Pval) %>% 
+      dplyr::select(group,variable,taxon,Estimate,`Conf Low`,`Conf High`,Pval,Padj,Statistic,everything())
+  return(test)
+}
+
+# Linear models ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# Linear Regression
+# •	Normality of variables
+# •	Homogeneity of variance of residuals
+# •	Linearity for quantitative predictors
+
+lin_reg = function(data,f,fam='gaussian', name='test'){
+  # data = df; name = sig[i]
+  form = as.formula(f)
+  
+  # Run model
+  model = glm(form, family = fam, data = data)
+  stats = summary(model)$coefficients %>% as.data.frame() %>% 
+    rownames_to_column('Variable') %>% 
+    filter(Variable!='(Intercept)') %>% 
+    mutate(Test = name, Formula = f, .before=Variable) %>% 
+    mutate(conf_low = Estimate-(1.96*`Std. Error`),
+           conf_high = Estimate+(1.96*`Std. Error`),
+           .after=Estimate) %>% 
+    rename(Pval = `Pr(>|t|)`)
+  
+  nameshort = name %>% str_split(':') %>% .[[1]] %>% .[1]
+  
+  # Linearity and homoscedasticity of the model
+  # Residual Plot
+
+  res = tibble(residuals = residuals(model),
+               fitted_values = fitted(model)) %>% 
+    ggplot(aes(fitted_values,residuals)) +
+    geom_hline(yintercept = 0, col='red', linewidth=1) +
+    geom_point(size=2) +
+    ylab('Residuals') + xlab('Fitted Values') + ggtitle(nameshort) +
+    theme_classic(base_size=15) +
+    theme(plot.title = element_text(size = 16))
+  
+  # Homogeneity of variance of residuals
+  # Residual Q-Q plot
+  qq <- data.frame(Theoretical = qnorm(ppoints(length(residuals(model)))),
+                        Observed = sort(residuals(model))) %>% 
+    ggplot(aes(sample=Observed)) + 
+    geom_qq() + geom_qq_line(color='red') +
+    labs(x = "Theoretical Quantiles", y = "Observed Quantiles",
+         title = nameshort) +
+    theme_classic(base_size=15) +
+    theme(plot.title = element_text(size = 16))
+  
+  # Linearity for quantitative predictors
+  # Scatterplot
+  X = str_split(f,'[~]') %>% .[[1]] %>% .[1] %>% str_trim() %>% 
+    str_remove_all('rescale[(]|[)]')
+  Y = str_split(f,'[~]') %>% .[[1]] %>% .[2] %>% 
+    str_split('[+]') %>% .[[1]] %>% .[1] %>% str_trim() %>% str_remove_all('`')
+  Y = ifelse(str_detect(Y, 'rescale[(]'),
+             Y %>% str_remove('rescale[(]') %>% str_sub(end=str_length(.)-1),Y)
+  
+  data$temp_X = data[[X]]
+  data$temp_Y = data[[Y]]
+  X = ifelse(X=='norm_pcresol','p-Cresol',ifelse(X=='norm_pag','Phenylacetylglutamine',X))
+  Y = Y %>% str_split(':') %>% .[[1]] %>% .[1]
+  sc = ggplot(data,aes(temp_Y,temp_X)) +
+    geom_point() +
+    geom_smooth(method='lm') +
+    theme_classic(base_size=15) +
+    xlab(X) + ylab(Y)
+  
+  return(list(stats = stats,RES=res, QQ = qq, SC = sc))
+}
+
+glm_met = function(df,var,grp){
+  # df=temp;var='norm_pcresol';grp='All'
+
+  # Save model data
+  test = list()
+  for(i in 1:length(sig)){
+    # i=12
+    
+    # Create formula for glm
+    if(grp=='All'){
+      f = paste0('rescale(',var,')~rescale(`',sig[i],'`)+Sex+Status+bristol+depth')
+    } else {
+      f = paste0('rescale(',var,')~rescale(`',sig[i],'`)+Sex+bristol+depth')
+    }
+
+    model = lin_reg(df,f,name = sig[i])
+    model$stats$Variable = str_remove_all(model$stats$Variable,'rescale[(]|[)]')
+    
+    # test = test %>% rbind(g %>% mutate(Taxon = sig[i]))
+    test = test %>% append(list(model))
+    names(test)[length(test)] = sig[i]
+  }
+  
+  stats = lapply(test,function(x) x$stats) %>% bind_rows() %>% 
+    mutate(Type = ifelse(str_detect(Test,'s__'),
+                         'Taxonomy','Pathway'),.before=Test) %>% 
+    mutate(var_cat = ifelse(str_detect(Variable,'`|s__'),
+                            'Abundance',Variable),.after=Variable) %>% 
+    group_by(var_cat,Type) %>% 
+    mutate(Padj = p.adjust(Pval,method='BH'),.after=Pval) %>%
+    ungroup()
+    
+  # Residual Plot
+  plots_res = lapply(test,function(x) x$RES)
+  plots_res = ggarrange(plotlist=plots_res, ncol = 3,nrow = 5)
+  # Residual QQ
+  plots_qq = lapply(test,function(x) x$QQ)
+  plots_qq = ggarrange(plotlist=plots_qq, ncol = 3,nrow = 5)
+  # Scatterplot
+  plots_sc = lapply(test,function(x) x$SC)
+  plots_sc = ggarrange(plotlist=plots_sc, ncol = 3,nrow = 5)
+  
+  return(list(Stats = stats, Plot_SC = plots_sc, Plot_Res = plots_res, Plot_QQ = plots_qq))
+}
+```
+
+```{r Univariate Analysis}
+# Run all taxa/pwys of interest
+sig = c(sig.taxa,sig.pwy)
+
+# Filter out NA values
+temp = psm %>% filter(!is.na(pcresol))
+
+# Run Spearman tests
+spearman.lax = correlate_met(temp, 'pcresol',grp='All') %>% 
+  rbind(correlate_met(temp, 'phenylacetylglutamine',grp='All')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='PD'),'pcresol',grp='PD')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='PD'),'phenylacetylglutamine',grp='PD')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='Ctrl'),'pcresol',grp='Ctrl')) %>% 
+  rbind(correlate_met(temp %>% filter(Status=='Ctrl'),'phenylacetylglutamine',grp='Ctrl')) %>% 
+  mutate_at(vars(names(.)[4:9]),as.numeric)
+
+# Fix the Padj values, since the taxa and pwys were run together
+spearman.lax = spearman.lax %>% 
+  mutate(Dataset = ifelse(str_detect(taxon,'s__'),'Taxonomy','Pathway'),.before=group) %>% 
+  group_by(Dataset,group,variable) %>% 
+  mutate(Padj = p.adjust(Pval, method='BH')) %>% ungroup() %>%
+  # Format some pathway names
+  mutate(taxon = str_replace(taxon, '[&]beta;-D','B-D')) %>% 
+  mutate(taxon = str_wrap(taxon,40))
+```
+
+```{r Set order for all plots}
+species_order = spearman.lax %>% filter(Dataset=='Taxonomy',group=='All',variable=='pcresol') %>% 
+  arrange(Estimate)
+species_order$taxon = str_remove_all(species_order$taxon,'s__') %>% str_replace_all('_',' ')
+
+pwy_order = spearman.lax %>% filter(Dataset=='Pathway',group=='All',variable=='pcresol') %>% 
+  arrange(Estimate)
+
+order = c(species_order$taxon,pwy_order$taxon)
+```
+
+```{r Figure Pre-formatting}
+spearman.lax[spearman.lax=='pcresol'] = 'p-Cresol'
+spearman.lax[spearman.lax=='phenylacetylglutamine'] = 'Phenylacetylglutamine'
+spearman.lax$taxon = str_remove_all(spearman.lax$taxon,'s__') %>% str_replace_all('_',' ')
+spearman.lax$taxon = factor(spearman.lax$taxon, levels = order)
+```
+
+```{r Multivariable Analysis}
+# Select all terms that were univariately significant
+sigtaxa = spearman.lax %>% mutate(taxon=as.character(taxon)) %>% 
+  mutate(taxon = ifelse(Dataset=='Taxonomy',paste('s__',str_replace_all(taxon,' ','_'),sep=''),taxon)) %>% 
+  filter(Padj<0.05) %>% pull(taxon) %>% unique() %>% as.character()
+sig2 = sig %>% str_replace('[&]beta;-D','B-D') %>% str_wrap(40)
+sig2 = sig2[sig2 %in% sigtaxa]
+
+# Run linear models
+temp = psm %>% filter(!is.na(pcresol))
+glm = list(pcresol_All = glm_met(temp,'norm_pcresol',grp='All')) %>% 
+  append(list(pag_All = glm_met(temp,'norm_pag',grp='All'))) %>% 
+  append(list(pcresol_PD = glm_met(temp %>% filter(Status=='PD'),'norm_pcresol',grp='PD'))) %>% 
+  append(list(pag_PD = glm_met(temp %>% filter(Status=='PD'),'norm_pag',grp='PD'))) %>% 
+  append(list(pcresol_Ctrl = glm_met(temp %>% filter(Status=='Ctrl'),'norm_pcresol',grp='Ctrl'))) %>% 
+  append(list(pag_Ctrl = glm_met(temp %>% filter(Status=='Ctrl'),'norm_pag',grp='Ctrl')))
+
+# Extract all stats
+glm.lax = tibble()
+for(i in 1:length(glm)){
+  n = names(glm)[i] %>% str_split('_') %>% .[[1]]
+  s = glm[[i]]$Stats %>% 
+    mutate(Metabolite = ifelse(n[1]=='pcresol','p-Cresol',
+                               ifelse(n[1]=='pag','Phenylacetylglutamine',n[1])),
+           Group = n[2],.before=Type)
+  glm.lax = glm.lax %>% rbind(s)
+}
+
+# Extract just the relevant rows for plotting
+glm_species = glm.lax %>% filter(str_detect(var_cat,'Abundance')) %>% 
+  select(-Variable,-var_cat)
+```
+
+```{r Create Figures}
+# Edit levels for plotting
+# glm_species[glm_species=='pcresol'] = 'p-Cresol'
+# glm_species[glm_species=='phenylacetylglutamine'] = 'Phenylacetylglutamine'
+glm_species$Test = str_remove_all(glm_species$Test,'s__') %>% str_replace_all('_',' ') %>%
+  str_replace('[&]beta;-D','B-D') %>% str_wrap(40)
+
+# Filter to only include stuff that was significant in the total cohort univariately
+glm_species2 = glm_species %>% 
+  left_join(spearman.lax %>% 
+              # filter(group=='All') %>% 
+              mutate(Padj = as.numeric(Padj<0.05)) %>% 
+              select(taxon,variable,group,Padj) %>%
+              rename(Test=taxon,Metabolite=variable,Group=group,Univar = Padj)) %>% 
+  filter(Univar==1) %>% # sig univariately in total cohort
+  group_by(Type,Group,Metabolite) %>% 
+  mutate(Padj=p.adjust(Pval,method='BH')) %>% ungroup
+
+# Plotting function - labels the plot automatically
+# vars = the variables you want to include in the plot
+prep_plot = function(vars,type){
+  # vars = 'p-Cresol'; type='Pathway'
+  p = spearman.lax %>% filter(Dataset==type) %>% 
+    left_join(glm_species2 %>% rename(taxon=Test,variable=Metabolite,mult=Padj,group=Group) %>% 
+                select(group,taxon, variable,mult)) %>% 
+                mutate(mult = ifelse(is.na(mult),'NS',ifelse(mult<0.05,"Sig","NS"))) %>% 
+    mutate(taxon = factor(.$taxon, levels = order)) %>% droplevels() %>% 
+    mutate(Padj = ifelse(Padj>0.05,'',
+                        ifelse(Padj>0.01,'*',
+                               ifelse(Padj>0.001,'**',
+                                      ifelse(Padj<=0.001,'***',''))))) %>% 
+    mutate(mult = ifelse(Padj=='','NS',mult)) %>% 
+    filter(variable %in% vars) %>% 
+    mutate(variable = ifelse(variable=='Phenylacetylglutamine','Phenylacetyl-\nglutamine',variable)) %>% 
+    ggplot(aes(group,taxon,fill = Estimate, col=mult)) +
+    geom_point(size =14, pch=21,stroke=1.8) +
+    theme_classic(base_size = 18) +
+    scale_fill_gradient2(low="darkblue", high="darkred", guide="colorbar") +
+    scale_color_manual(values = c('white','black')) +
+    geom_text(aes(label=Padj),size = 10, col = 'white',nudge_y = -0.25) +
+    ylab(NULL) + xlab(NULL) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+    facet_wrap('variable')
+  return(p)
+}
+
+# Plot amino acids
+plot.species = prep_plot(c('Phenylacetylglutamine','p-Cresol'),'Taxonomy')
+plot.species
+
+plot.pwy = prep_plot(c('Phenylacetylglutamine','p-Cresol'),'Pathway')
+plot.pwy
+
+# Save stats
+stats_out = spearman.lax %>%
+    left_join(glm_species2 %>% rename(taxon=Test,variable=Metabolite,mult=Padj,group=Group) %>% 
+                select(group,taxon, variable,mult)) %>% 
+  rename('Padj (Multivariable)' = mult)
+```
+
+```{r Scatterplots of key results}
+# Interesting results:
+to_test = stats_out %>% filter(Padj<0.05, `Padj (Multivariable)`<0.05) %>% pull(taxon) %>% unique()
+
+stats_3cd = spearman.lax %>% mutate(Pval = ifelse(Pval<0.001,'<0.001',signif(Pval,2))) %>% 
+  mutate(CI = paste0('(',round(`Conf Low`,2),',',round(`Conf High`,2),')')) %>% 
+  mutate(label = paste('r=',CI,', P=',Pval,sep='')) %>% 
+  mutate(label = sapply(.$label, function(x)str_replace_all(x,'=<','<'))) %>% 
+  filter(group!='All') %>% rename(Status=group)
+
+# Obeum
+p1 = psm %>% pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine')) %>% 
+  ggplot(aes(s__Blautia_obeum,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ylab('Serum Concentration') + xlab('Blautia obeum') +
+  facet_wrap('met')
+
+# Wexlerae
+p2 = psm %>% pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine')) %>% 
+  ggplot(aes(s__Blautia_wexlerae,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ylab('Serum Concentration') + xlab('Blautia wexlerae') +
+  facet_wrap('met')
+
+# Anaerobic energy metabolism
+plot.pwy.indiv = psm %>% pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine')) %>% 
+  ggplot(aes(`PWY-7383: anaerobic energy metabolism (invertebrates, cytosol)`,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ylab('Serum Concentration') + xlab('Anaerobic Energy Metabolism (PWY-7383)') +
+  facet_wrap('met')
+
+plot.species.indiv = ggarrange(plotlist = list(p1,p2), common.legend = T, legend = 'right',nrow = 1)
+plot.species.indiv
+```
+
+```{r MetaCyc EC Children}
+# These are EC terms from anaerobic energy metabolism
+child_meta = c('PEPDEPHOS-RXN','RXN-12481','4.1.1.32-RXN','ALANINE-AMINOTRANSFERASE-RXN','ALARACECAT-RXN','ASPAMINOTRANS-RXN','MALATE-DEH-RXN')
+  
+ps2 = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["rxn"]] %>% microbiome::transform('clr') %>% psmelt() %>% select(Species,everything())
+
+ps3 = ps2 %>% filter(str_detect(Species,child_meta[1]) |
+                       str_detect(Species,child_meta[2]) |
+                       str_detect(Species,child_meta[3]) |
+                       str_detect(Species,child_meta[4]) |
+                       str_detect(Species,child_meta[5]) |
+                       str_detect(Species,child_meta[6]) |
+                       str_detect(Species,child_meta[7]))
+
+# Calculate lfc
+relab = readRDS("../Reference Files/functional_phyloseq.rds") %>% .[["rxn"]] %>% microbiome::transform('compositional') %>% psmelt() %>% select(Species,everything()) %>% filter(str_detect(Species,child_meta[1]) |
+                       str_detect(Species,child_meta[2]) |
+                       str_detect(Species,child_meta[3]) |
+                       str_detect(Species,child_meta[4]) |
+                       str_detect(Species,child_meta[5]) |
+                       str_detect(Species,child_meta[6]) |
+                       str_detect(Species,child_meta[7])) %>% 
+  group_by(Status,Species) %>% 
+  summarize(Abundance = mean(Abundance)) %>% 
+  pivot_wider(names_from = Status, values_from = Abundance) %>% 
+  mutate(log2fc = log2(PD/Ctrl))
+
+# Load stats
+temp = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='univar') %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(SigU = median(q_val<0.05)) %>% ungroup() %>% 
+  filter(Species %in% ps3$Species)
+
+temp2 = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% temp$Species) %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(SigM = median(q_val<0.05)) %>% ungroup()
+
+sigsum = readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='univar') %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(Uni = median(q_val)) %>% ungroup() %>% 
+  filter(Species %in% ps3$Species) %>% 
+  left_join(readxl::read_xlsx('../Results/Supplementary Data/Differential Abundance/EC_Stats2.xlsx',sheet='multivar') %>%
+  filter(Variable=='StatusPD', Species %in% temp$Species) %>% 
+  group_by(Species,association_dir) %>% add_count() %>% filter(n>1) %>% 
+  summarize(Multi = median(q_val)) %>% ungroup()) %>% 
+  filter(Species !='RXN-12481: NO_NAME') %>% 
+  rename('EC Term' = Species) %>% 
+  mutate(Sig = ifelse(Uni<0.05 & Multi<0.05,'Sig','ns'))
+
+writexl::write_xlsx(list(sigsum),'../Results/Tables/Table S3 - EC terms associated with PWY 7383.xlsx')
+
+# Plot these ones
+ps4 = ps3 %>% filter(Species %in% sigsum$`EC Term`[sigsum$Sig=='Sig']) %>% 
+  filter(!is.na(pcresol)) %>% 
+  pivot_longer(cols = c('pcresol','phenylacetylglutamine'),
+                          names_to = 'met',values_to = 'value') %>%
+  mutate(met = ifelse(met=='pcresol','p-Cresol','Phenylacetylglutamine'))
+
+stats_3d2 = ps4 %>% group_by(Status, met) %>% 
+  group_modify(~cor.test(.$value,.$Abundance,method='spearman',data=.) %>% broom::tidy()) %>%
+  mutate(pval = ifelse(p.value<0.001,'<0.001',signif(p.value,2))) %>% 
+  left_join(ps4 %>% group_by(Status, met) %>% 
+            group_modify(~cor.test(rank(.$value),rank(.$Abundance),
+                method='pearson',data=.) %>% broom::tidy()) %>% 
+            select(Status,met,conf.low,conf.high)) %>% 
+  select(c(Status:estimate),conf.low,conf.high,everything()) %>% 
+  mutate(CI = paste0('(',round(conf.low,2),',',round(conf.high,2),')'),.after=estimate) %>% 
+  mutate(label = paste('r=',CI,', P=',pval,sep=''))
+
+plot.ec = ps4 %>% 
+  ggplot(aes(Abundance,value,col=Status)) +
+  geom_point() + geom_smooth(method='lm') +
+  theme_classic(base_size=20) +
+  ylab('Serum Concentration') + xlab('4.1.1.32-RXN (Oxaloacetate to PEP)') +
+  facet_wrap('met')
+plot.ec
+```
+
+```{r Save Stats}
+L = list('Fig. 3a-d' = stats_out %>% arrange(Dataset),
+         'Fig. 3e' = stats_3d2 %>% rename(Metabolite = met,Pval = p.value) %>% dplyr::select(-pval,-label))
+writexl::write_xlsx(L,'../Results/Supplementary Data/0. FIGURE STATISTICS/Figure 3.xlsx')
+```
+
+# COMPILE FIGURE
+
+```{r}
+p1 = ggarrange(plotlist = list(plot.species, plot.pwy), ncol = 2, widths = c(3.4,4))
+p2 = ggarrange(plotlist = list(plot.species.indiv, NULL), ncol = 2, widths = c(10,1))
+p3 = ggarrange(plotlist = list(plot.pwy.indiv, plot.ec,NULL), ncol = 3, widths = c(5,5,1),common.legend = T, legend = 'right')
+
+p = plot_grid(p1, p2, p3, ncol = 1, rel_heights = c(2.5,2,2))+
+  theme(plot.margin = margin(1,0.1,0.1,2, "cm")) +
+  draw_label(label="A",x=-0.009,y=0.98, fontface = "bold", size = 40) +
+  draw_label(label="B",x=0.47,y=0.98, fontface = "bold", size = 40) +
+  draw_label(label="C",x=-0.009,y=0.625, fontface = "bold", size = 40) +
+  draw_label(label="D",x=-0.009,y=0.31, fontface = "bold", size = 40) +
+  draw_label(label="E",x=0.45,y=0.31, fontface = "bold", size = 40)
+
+# add statistics
+pp = p +
+  # B obeum
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia obeum',variable=='p-Cresol',Status=='Ctrl') %>% pull(label),
+             x=0.06,y=0.42, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia obeum',variable=='p-Cresol',Status=='PD') %>% pull(label),
+             x=0.06,y=0.39, size = 18, color = '#00BFC4',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia obeum',variable=='Phenylacetylglutamine',Status=='Ctrl') %>% pull(label),
+             x=0.245,y=0.42, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia obeum',variable=='Phenylacetylglutamine',Status=='PD') %>% pull(label),
+             x=0.245,y=0.39, size = 18, color = '#00BFC4',hjust=0) +
+  # B wexlerae
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia wexlerae',variable=='p-Cresol',Status=='Ctrl') %>% pull(label),
+             x=0.485,y=0.42, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia wexlerae',variable=='p-Cresol',Status=='PD') %>% pull(label),
+             x=0.485,y=0.39, size = 18, color = '#00BFC4',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia wexlerae',variable=='Phenylacetylglutamine',Status=='Ctrl') %>% pull(label),
+             x=0.66,y=0.42, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='Blautia wexlerae',variable=='Phenylacetylglutamine',Status=='PD') %>% pull(label),
+             x=0.66,y=0.39, size = 18, color = '#00BFC4',hjust=0) +
+  # Anaerobic energy metabolism
+  draw_label(label=stats_3cd %>% filter(taxon=='PWY-7383: anaerobic energy metabolism\n(invertebrates, cytosol)',variable=='p-Cresol',Status=='Ctrl') %>% pull(label),
+             x=0.06,y=0.11, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='PWY-7383: anaerobic energy metabolism\n(invertebrates, cytosol)',variable=='p-Cresol',Status=='PD') %>% pull(label),
+             x=0.06,y=0.08, size = 18, color = '#00BFC4',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='PWY-7383: anaerobic energy metabolism\n(invertebrates, cytosol)',variable=='Phenylacetylglutamine',Status=='Ctrl') %>% pull(label),
+             x=0.245,y=0.11, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3cd %>% filter(taxon=='PWY-7383: anaerobic energy metabolism\n(invertebrates, cytosol)',variable=='Phenylacetylglutamine',Status=='PD') %>% pull(label),
+             x=0.245,y=0.08, size = 18, color = '#00BFC4',hjust=0) +
+  # Oxaloacetate to PEP
+  draw_label(label=stats_3d2 %>% filter(met=='p-Cresol',Status=='Ctrl') %>% pull(label),
+             x=0.485,y=0.11, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3d2 %>% filter(met=='p-Cresol',Status=='PD') %>% pull(label),
+             x=0.485,y=0.08, size = 18, color = '#00BFC4',hjust=0) +
+  draw_label(label=stats_3d2 %>% filter(met=='Phenylacetylglutamine',Status=='Ctrl') %>% pull(label),
+             x=0.66,y=0.11, size = 18, color = '#F8766D',hjust=0) +
+  draw_label(label=stats_3d2 %>% filter(met=='Phenylacetylglutamine',Status=='PD') %>% pull(label),
+             x=0.66,y=0.08, size = 18, color = '#00BFC4',hjust=0)
+
+
+ggsave('../Results/Figures/Figure 3 - Metabolites.pdf',height=14, width = 18)
+```
+
+```{r Save the validation figures}
+library(gridExtra)
+for(i in 1:length(glm)){
+  name = names(glm)[i]
+  name = ifelse(str_detect(name,'pag'),str_replace(name,'pag','phenylacetylglutamine'),name)
+  temp = glm[[i]]
+  ml <- marrangeGrob(list(temp$Plot_SC,temp$Plot_Res,temp$Plot_QQ), nrow=1, ncol=1)
+  ggsave(paste0('../Results/Supplementary Data/Validation of Statistical Tests/Figure 3 - ',name,'.pdf'),
+         ml,height=16.5, width = 12.75)
+}
+```
+
